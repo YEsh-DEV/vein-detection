@@ -166,6 +166,20 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
+  // Cancel enrollment when leaving enroll tab with partial samples
+  useEffect(() => {
+    if (activeTab !== 'enroll' && enrollSamples.length > 0 && enrollUsername) {
+      fetch('/api/enroll/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: enrollUsername }),
+      }).catch(() => {});
+      setEnrollSamples([]);
+      setEnrollUsername('');
+      setEnrollStatusMsg('');
+    }
+  }, [activeTab]);
+
   // Trigger Real Scan with 3-Second Countdown
   const handleScanWithCountdown = async (actionType = 'Palm Pay Auth') => {
     if (isScanning || scanCountdown !== null) return;

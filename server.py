@@ -4,7 +4,7 @@ server.py
 ---------
 FastAPI + Uvicorn backend serving the Palm Vein Biometrics API & Neobrutalism Web UI.
 Directly connects to Raspberry Pi NoIR Camera (Picamera2) or USB Webcam (OpenCV).
-Features thread-safe camera locking and non-blocking threadpool offloading.
+Features thread-safe camera locking, non-blocking threadpool offloading, and typed Pydantic contracts.
 """
 
 import os
@@ -13,16 +13,18 @@ import time
 import base64
 import threading
 import asyncio
+import re
 import cv2
 import numpy as np
 import mimetypes
 import sqlite3
+from typing import Optional, List, Tuple
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # Ensure proper MIME types on all OS platforms (especially Windows)
 mimetypes.add_type("application/javascript", ".js")
@@ -68,6 +70,92 @@ CAMERA_AVAILABLE = False
 CAMERA_TYPE = None
 preview_cfg = None
 still_cfg = None
+
+
+# ── Request Models ──────────────────────────────────────────────────────────
+class SampleReq(BaseModel):
+    username: str
+    sample_idx: int = 0
+
+
+class SaveReq(BaseModel):
+    username: str
+
+
+class CancelReq(BaseModel):
+    username: str
+
+
+# ── Response Models ─────────────────────────────────────────────────────────
+class StatusResponse(BaseModel):
+    status: str
+    camera_available: bool
+    camera_type: str
+    users_count: int
+    total_templates: int
+    match_threshold: float
+
+
+class UserItem(BaseModel):
+    username: str
+    sample_count: int
+    enrolled_at: str
+
+
+class UsersResponse(BaseModel):
+    users: List[UserItem]
+
+
+class ScanResponse(BaseModel):
+    accepted: bool
+    username: Optional[str]
+    score: float
+    threshold: float
+    time_ms: int
+    clahe_base64: Optional[str] = None
+
+
+class SampleResponse(BaseModel):
+    success: bool
+    sample_count: int
+    vr_mean: float
+    thumb: str
+
+
+class SaveResponse(BaseModel):
+    success: bool
+    username: str
+    samples_stored: int
+
+
+class DeleteResponse(BaseModel):
+    success: bool
+    deleted: str
+
+
+class ResetResponse(BaseModel):
+    success: bool
+    message: str
+
+
+class SelfMatchItem(BaseModel):
+    username: str
+    min_score: float
+    avg_score: float
+    max_score: float
+    quality: str   # "GOOD" or "WARN"
+
+
+class CrossMatchItem(BaseModel):
+    pair: str
+    score: float
+    status: str   # "OK" or "WARN"
+
+
+class ReportResponse(BaseModel):
+    self_matches: List[SelfMatchItem]
+    cross_matches: List[CrossMatchItem]
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -198,16 +286,6 @@ def save_capture_to_disk(gray: np.ndarray, roi: np.ndarray, username: str, mode:
         print(f"[!] Warning: Failed saving capture to disk: {e}")
 
 
-# Request Models
-class SampleReq(BaseModel):
-    username: str
-    sample_idx: int = 0
-
-
-class SaveReq(BaseModel):
-    username: str
-
-
 # API Endpoints
 def generate_video_stream():
     """MJPEG stream of live camera for real-time positioning on screen (thread-safe)."""
@@ -250,12 +328,17 @@ def generate_video_stream():
             time.sleep(0.1)
 
 
+@app.get("/health")
+async def health():
+    return {"ok": True}
+
+
 @app.get("/api/video_feed")
 def video_feed():
     return StreamingResponse(generate_video_stream(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 
-@app.get("/api/status")
+@app.get("/api/status", response_model=StatusResponse)
 async def get_status():
     users = await run_in_threadpool(list_users)
     return {
@@ -268,13 +351,13 @@ async def get_status():
     }
 
 
-@app.get("/api/users")
+@app.get("/api/users", response_model=UsersResponse)
 async def get_users():
     users = await run_in_threadpool(list_users)
     return {"users": users}
 
 
-@app.delete("/api/users/{username}")
+@app.delete("/api/users/{username}", response_model=DeleteResponse)
 async def remove_user(username: str):
     exists = await run_in_threadpool(user_exists, username)
     if not exists:
@@ -284,7 +367,7 @@ async def remove_user(username: str):
     return {"success": True, "deleted": username}
 
 
-@app.delete("/api/database/reset")
+@app.delete("/api/database/reset", response_model=ResetResponse)
 async def reset_database():
     """
     WARNING: Deletes ALL enrolled users and templates.
@@ -301,7 +384,7 @@ async def reset_database():
     return {"success": True, "message": "All biometric data cleared. Re-enroll using live camera."}
 
 
-@app.post("/api/scan")
+@app.post("/api/scan", response_model=ScanResponse)
 async def scan_palm():
     t0 = time.time()
     try:
@@ -310,13 +393,30 @@ async def scan_palm():
         raise HTTPException(status_code=503, detail=str(e))
 
     try:
-        clahe_roi, probe_code = await run_in_threadpool(process_image, gray)
+        clahe_roi, probe_code = await asyncio.wait_for(
+            run_in_threadpool(process_image, gray),
+            timeout=15.0   # 15 seconds max for MediaPipe + Gabor on Pi 5
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail="Pipeline timeout. Ensure hand is visible and well-lit above camera."
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Pipeline error: {e}")
 
-    username, score = await run_in_threadpool(engine.identify, probe_code)
+    try:
+        username, score = await asyncio.wait_for(
+            run_in_threadpool(engine.identify, probe_code),
+            timeout=10.0   # 10 seconds max for MNHD search
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail="Matching timeout. Try again."
+        )
     elapsed = int((time.time() - t0) * 1000)
     accepted = (username is not None)
 
@@ -337,11 +437,29 @@ async def scan_palm():
     }
 
 
-@app.post("/api/enroll/sample")
+@app.post("/api/enroll/sample", response_model=SampleResponse)
 async def enroll_sample(req: SampleReq):
     uname = req.username.strip().lower()
-    if not uname:
-        raise HTTPException(status_code=400, detail="Username required")
+
+    # Validate: only letters, numbers, hyphens, underscores. Min 2 chars.
+    if not uname or not re.match(r'^[a-z0-9][a-z0-9_-]{1,29}$', uname):
+        raise HTTPException(
+            status_code=422,
+            detail="Username must be 2-30 characters: letters, numbers, hyphens, underscores only."
+        )
+
+    if user_exists(uname):
+        raise HTTPException(
+            status_code=409,
+            detail=f"User '{uname}' already enrolled. Delete first to re-enroll."
+        )
+
+    current_samples = enrollment_cache.get(uname, [])
+    if len(current_samples) >= 6:
+        raise HTTPException(
+            status_code=400,
+            detail="Maximum 6 samples reached. Save enrollment or clear and restart."
+        )
 
     try:
         gray = await run_in_threadpool(capture_frame_gray)
@@ -349,7 +467,15 @@ async def enroll_sample(req: SampleReq):
         raise HTTPException(status_code=503, detail=str(e))
 
     try:
-        clahe_roi, code = await run_in_threadpool(process_image, gray)
+        clahe_roi, code = await asyncio.wait_for(
+            run_in_threadpool(process_image, gray),
+            timeout=15.0   # 15 seconds max for MediaPipe + Gabor on Pi 5
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail="Pipeline timeout. Move hand closer to camera and ensure good lighting."
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -371,21 +497,53 @@ async def enroll_sample(req: SampleReq):
     }
 
 
-@app.post("/api/enroll/save")
+@app.post("/api/enroll/save", response_model=SaveResponse)
 async def save_enrollment(req: SaveReq):
     uname = req.username.strip().lower()
-    if uname not in enrollment_cache or len(enrollment_cache[uname]) < 3:
-        raise HTTPException(status_code=400, detail="Need at least 3 captured samples to enroll")
 
-    samples = enrollment_cache[uname]
-    await run_in_threadpool(enroll_user, uname, samples)
-    await run_in_threadpool(engine.refresh_cache)
-    del enrollment_cache[uname]
+    if not uname or not re.match(r'^[a-z0-9][a-z0-9_-]{1,29}$', uname):
+        raise HTTPException(
+            status_code=422,
+            detail="Username must be 2-30 characters: letters, numbers, hyphens, underscores only."
+        )
 
-    return {"success": True, "username": uname, "samples_stored": len(samples)}
+    if user_exists(uname):
+        raise HTTPException(
+            status_code=409,
+            detail=f"User '{uname}' already enrolled. Delete first to re-enroll."
+        )
+
+    samples = enrollment_cache.get(uname, [])
+    if len(samples) < 3:
+        # Always clear on failure too
+        enrollment_cache.pop(uname, None)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Need at least 3 samples. Got {len(samples)}. Start enrollment again."
+        )
+
+    try:
+        await run_in_threadpool(enroll_user, uname, samples)
+        await run_in_threadpool(engine.refresh_cache)
+    except Exception as e:
+        enrollment_cache.pop(uname, None)
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+
+    count = len(samples)
+    enrollment_cache.pop(uname, None)   # Always clear after save
+    return {"success": True, "username": uname, "samples_stored": count}
 
 
-@app.get("/api/report")
+@app.post("/api/enroll/cancel")
+async def cancel_enrollment(req: CancelReq):
+    """Clear any partial enrollment cache for this username."""
+    uname = req.username.strip().lower()
+    cleared = uname in enrollment_cache
+    enrollment_cache.pop(uname, None)
+    return {"cleared": cleared, "username": uname}
+
+
+@app.get("/api/report", response_model=ReportResponse)
 async def get_report():
     def _compute_report():
         users = list_users()
@@ -408,7 +566,13 @@ async def get_report():
                 if scores:
                     mn, av, mx = min(scores), sum(scores) / len(scores), max(scores)
                     qual = "GOOD" if mx < 0.35 else "WARN"
-                    self_matches.append((u["username"], mn, av, mx, qual))
+                    self_matches.append({
+                        "username": u["username"],
+                        "min_score": round(float(mn), 4),
+                        "avg_score": round(float(av), 4),
+                        "max_score": round(float(mx), 4),
+                        "quality": qual
+                    })
 
         cross_matches = []
         if len(users) >= 2:
@@ -420,7 +584,11 @@ async def get_report():
                     if t1 and t2:
                         sc = match_templates(t1[0], t2[0])
                         stat = "OK" if sc > 0.45 else "WARN"
-                        cross_matches.append((f"{u1['username']} vs {u2['username']}", sc, stat))
+                        cross_matches.append({
+                            "pair": f"{u1['username']} vs {u2['username']}",
+                            "score": round(float(sc), 4),
+                            "status": stat
+                        })
 
         return {"self_matches": self_matches, "cross_matches": cross_matches}
 
