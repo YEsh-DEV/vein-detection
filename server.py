@@ -4,19 +4,24 @@ server.py
 ---------
 FastAPI + Uvicorn backend serving the Palm Vein Biometrics API & Neobrutalism Web UI.
 Directly connects to Raspberry Pi NoIR Camera (Picamera2) or USB Webcam (OpenCV).
+Features thread-safe camera locking and non-blocking threadpool offloading.
 """
 
 import os
 import sys
 import time
 import base64
+import threading
+import asyncio
 import cv2
 import numpy as np
 import mimetypes
+import sqlite3
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 # Ensure proper MIME types on all OS platforms (especially Windows)
@@ -31,6 +36,7 @@ from db_manager import (
     init_db, enroll_user, user_exists, list_users,
     delete_user, log_access, get_all_signatures,
     get_templates_by_ids, get_username, compute_signature,
+    DB_PATH,
 )
 from search_engine import SearchEngine
 from mediapipe_img import (
@@ -49,6 +55,9 @@ ROI_DIR = "roi_clahe"
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 os.makedirs(CAPTURE_DIR, exist_ok=True)
 os.makedirs(ROI_DIR, exist_ok=True)
+
+# Camera Threading Lock (prevents concurrent access clashes between MJPEG stream and still capture)
+_camera_lock = threading.Lock()
 
 # Hardware & Engine Globals
 engine = None
@@ -131,25 +140,23 @@ enrollment_cache = {}
 
 # Helpers
 def capture_frame_gray() -> np.ndarray:
-    """Capture a single live grayscale frame from camera."""
-    if CAMERA_TYPE == "picamera2" and picam2 is not None:
-        picam2.switch_mode(still_cfg)
-        frame = picam2.capture_array()
-        picam2.switch_mode(preview_cfg)
-        return cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-    
-    if CAMERA_TYPE == "opencv" and cv_cap is not None:
-        # Flush any stale buffer frames
-        for _ in range(2):
-            cv_cap.grab()
-        ret, frame = cv_cap.read()
-        if not ret or frame is None:
-            raise ValueError("Failed to capture frame from webcam.")
-        if len(frame.shape) == 3:
-            return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        return frame
+    """Capture a single live grayscale frame from camera (thread-safe)."""
+    with _camera_lock:
+        if CAMERA_TYPE == "picamera2" and picam2 is not None:
+            picam2.switch_mode(still_cfg)
+            frame = picam2.capture_array()
+            picam2.switch_mode(preview_cfg)
+            return cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
 
-    raise ValueError("No live camera available. Please connect Raspberry Pi camera or webcam.")
+        if CAMERA_TYPE == "opencv" and cv_cap is not None:
+            for _ in range(2):
+                cv_cap.grab()
+            ret, frame = cv_cap.read()
+            if not ret or frame is None:
+                raise ValueError("Failed to capture frame from webcam.")
+            return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
+
+        raise ValueError("No live camera available. Please connect Raspberry Pi camera or webcam.")
 
 
 def process_image(gray: np.ndarray):
@@ -203,36 +210,41 @@ class SaveReq(BaseModel):
 
 # API Endpoints
 def generate_video_stream():
-    """MJPEG stream of live camera for real-time positioning on screen."""
+    """MJPEG stream of live camera for real-time positioning on screen (thread-safe)."""
     while True:
         try:
-            if CAMERA_TYPE == "picamera2" and picam2 is not None:
-                frame = picam2.capture_array()
-                bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            elif CAMERA_TYPE == "opencv" and cv_cap is not None:
-                ret, frame = cv_cap.read()
-                if not ret or frame is None:
-                    time.sleep(0.05)
-                    continue
-                bgr = frame
-            else:
-                bgr = np.full((480, 640, 3), 30, dtype=np.uint8)
-                cv2.putText(bgr, "CAMERA OFFLINE", (180, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            with _camera_lock:
+                if CAMERA_TYPE == "picamera2" and picam2 is not None:
+                    frame = picam2.capture_array()
+                    bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                elif CAMERA_TYPE == "opencv" and cv_cap is not None:
+                    for _ in range(2):
+                        cv_cap.grab()
+                    ret, frame = cv_cap.read()
+                    if not ret or frame is None:
+                        time.sleep(0.05)
+                        continue
+                    bgr = frame
+                else:
+                    bgr = np.full((480, 640, 3), 30, dtype=np.uint8)
+                    cv2.putText(bgr, "CAMERA OFFLINE", (180, 240),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
-            # Draw center alignment box
-            h, w, _ = bgr.shape
+            # Draw HUD outside the lock
+            h, w = bgr.shape[:2]
             cx, cy = w // 2, h // 2
             box_sz = 120
-            cv2.rectangle(bgr, (cx - box_sz, cy - box_sz), (cx + box_sz, cy + box_sz), (0, 255, 200), 2)
-            cv2.putText(bgr, "ALIGN PALM HERE", (cx - 95, cy - box_sz - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 200), 2)
+            cv2.rectangle(bgr, (cx - box_sz, cy - box_sz), (cx + box_sz, cy + box_sz),
+                          (0, 255, 200), 2)
+            cv2.putText(bgr, "ALIGN PALM HERE", (cx - 95, cy - box_sz - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 200), 2)
 
             ret, buffer = cv2.imencode('.jpg', bgr, [cv2.IMWRITE_JPEG_QUALITY, 70])
             if not ret:
                 time.sleep(0.04)
                 continue
-            frame_bytes = buffer.tobytes()
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+            yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n'
+                   + buffer.tobytes() + b'\r\n')
             time.sleep(0.04)
         except Exception:
             time.sleep(0.1)
@@ -244,8 +256,8 @@ def video_feed():
 
 
 @app.get("/api/status")
-def get_status():
-    users = list_users()
+async def get_status():
+    users = await run_in_threadpool(list_users)
     return {
         "status": "online",
         "camera_available": CAMERA_AVAILABLE,
@@ -257,42 +269,59 @@ def get_status():
 
 
 @app.get("/api/users")
-def get_users():
-    return {"users": list_users()}
+async def get_users():
+    users = await run_in_threadpool(list_users)
+    return {"users": users}
 
 
 @app.delete("/api/users/{username}")
-def remove_user(username: str):
-    if not user_exists(username):
+async def remove_user(username: str):
+    exists = await run_in_threadpool(user_exists, username)
+    if not exists:
         raise HTTPException(status_code=404, detail="User not found")
-    delete_user(username)
-    engine.refresh_cache()
+    await run_in_threadpool(delete_user, username)
+    await run_in_threadpool(engine.refresh_cache)
     return {"success": True, "deleted": username}
 
 
+@app.delete("/api/database/reset")
+async def reset_database():
+    """
+    WARNING: Deletes ALL enrolled users and templates.
+    Use this to clear test data before live Pi enrollment.
+    """
+    def _wipe():
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("DELETE FROM templates")
+            conn.execute("DELETE FROM access_log")
+            conn.execute("DELETE FROM users")
+            conn.commit()
+    await run_in_threadpool(_wipe)
+    await run_in_threadpool(engine.refresh_cache)
+    return {"success": True, "message": "All biometric data cleared. Re-enroll using live camera."}
+
+
 @app.post("/api/scan")
-def scan_palm():
+async def scan_palm():
     t0 = time.time()
     try:
-        gray = capture_frame_gray()
+        gray = await run_in_threadpool(capture_frame_gray)
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
     try:
-        clahe_roi, probe_code = process_image(gray)
+        clahe_roi, probe_code = await run_in_threadpool(process_image, gray)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Pipeline error: {e}")
 
-    username, score = engine.identify(probe_code)
+    username, score = await run_in_threadpool(engine.identify, probe_code)
     elapsed = int((time.time() - t0) * 1000)
     accepted = (username is not None)
 
-    log_access(user_id=None, score=score, accepted=accepted)
-
-    # Save to disk
-    save_capture_to_disk(gray, clahe_roi, username or "unknown", "scan")
+    await run_in_threadpool(log_access, user_id=None, score=score, accepted=accepted)
+    await run_in_threadpool(save_capture_to_disk, gray, clahe_roi, username or "unknown", "scan")
 
     # Encode CLAHE ROI as base64 thumbnail
     _, buf = cv2.imencode(".png", clahe_roi)
@@ -309,29 +338,27 @@ def scan_palm():
 
 
 @app.post("/api/enroll/sample")
-def enroll_sample(req: SampleReq):
+async def enroll_sample(req: SampleReq):
     uname = req.username.strip().lower()
     if not uname:
         raise HTTPException(status_code=400, detail="Username required")
 
     try:
-        gray = capture_frame_gray()
+        gray = await run_in_threadpool(capture_frame_gray)
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
     try:
-        clahe_roi, code = process_image(gray)
+        clahe_roi, code = await run_in_threadpool(process_image, gray)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Extraction error: {e}")
 
-    # Add to in-memory session cache
     enrollment_cache.setdefault(uname, []).append(code)
     sample_idx = len(enrollment_cache[uname])
 
-    # Save capture and ROI to disk
-    save_capture_to_disk(gray, clahe_roi, uname, "enroll", idx=sample_idx)
+    await run_in_threadpool(save_capture_to_disk, gray, clahe_roi, uname, "enroll", idx=sample_idx)
 
     _, buf = cv2.imencode(".png", clahe_roi)
     b64_roi = base64.b64encode(buf).decode("utf-8")
@@ -345,56 +372,59 @@ def enroll_sample(req: SampleReq):
 
 
 @app.post("/api/enroll/save")
-def save_enrollment(req: SaveReq):
+async def save_enrollment(req: SaveReq):
     uname = req.username.strip().lower()
     if uname not in enrollment_cache or len(enrollment_cache[uname]) < 3:
         raise HTTPException(status_code=400, detail="Need at least 3 captured samples to enroll")
 
     samples = enrollment_cache[uname]
-    enroll_user(uname, samples)
-    engine.refresh_cache()
+    await run_in_threadpool(enroll_user, uname, samples)
+    await run_in_threadpool(engine.refresh_cache)
     del enrollment_cache[uname]
 
     return {"success": True, "username": uname, "samples_stored": len(samples)}
 
 
 @app.get("/api/report")
-def get_report():
-    users = list_users()
-    sig_data = get_all_signatures()
-    uid_map = {}
-    for uid in sig_data["user_ids"]:
-        if uid not in uid_map.values():
-            try:
-                uid_map[get_username(uid)] = uid
-            except KeyError:
-                pass
+async def get_report():
+    def _compute_report():
+        users = list_users()
+        sig_data = get_all_signatures()
+        uid_map = {}
+        for uid in sig_data["user_ids"]:
+            if uid not in uid_map.values():
+                try:
+                    uid_map[get_username(uid)] = uid
+                except KeyError:
+                    pass
 
-    self_matches = []
-    for u in users:
-        uid = uid_map.get(u["username"])
-        tids = [tid for tid, uid_val in zip(sig_data["template_ids"], sig_data["user_ids"]) if uid_val == uid]
-        if len(tids) >= 2:
-            tmpl = get_templates_by_ids(tids)
-            scores = [match_templates(tmpl[a], tmpl[b]) for a in range(len(tmpl)) for b in range(a + 1, len(tmpl))]
-            if scores:
-                mn, av, mx = min(scores), sum(scores) / len(scores), max(scores)
-                qual = "GOOD" if mx < 0.35 else "WARN"
-                self_matches.append((u["username"], mn, av, mx, qual))
+        self_matches = []
+        for u in users:
+            uid = uid_map.get(u["username"])
+            tids = [tid for tid, uid_val in zip(sig_data["template_ids"], sig_data["user_ids"]) if uid_val == uid]
+            if len(tids) >= 2:
+                tmpl = get_templates_by_ids(tids)
+                scores = [match_templates(tmpl[a], tmpl[b]) for a in range(len(tmpl)) for b in range(a + 1, len(tmpl))]
+                if scores:
+                    mn, av, mx = min(scores), sum(scores) / len(scores), max(scores)
+                    qual = "GOOD" if mx < 0.35 else "WARN"
+                    self_matches.append((u["username"], mn, av, mx, qual))
 
-    cross_matches = []
-    if len(users) >= 2:
-        for i in range(len(users)):
-            for j in range(i + 1, len(users)):
-                u1, u2 = users[i], users[j]
-                t1 = get_templates_by_ids([tid for tid, uid in zip(sig_data["template_ids"], sig_data["user_ids"]) if uid == uid_map.get(u1["username"])][:1])
-                t2 = get_templates_by_ids([tid for tid, uid in zip(sig_data["template_ids"], sig_data["user_ids"]) if uid == uid_map.get(u2["username"])][:1])
-                if t1 and t2:
-                    sc = match_templates(t1[0], t2[0])
-                    stat = "OK" if sc > 0.45 else "WARN"
-                    cross_matches.append((f"{u1['username']} vs {u2['username']}", sc, stat))
+        cross_matches = []
+        if len(users) >= 2:
+            for i in range(len(users)):
+                for j in range(i + 1, len(users)):
+                    u1, u2 = users[i], users[j]
+                    t1 = get_templates_by_ids([tid for tid, uid in zip(sig_data["template_ids"], sig_data["user_ids"]) if uid == uid_map.get(u1["username"])][:1])
+                    t2 = get_templates_by_ids([tid for tid, uid in zip(sig_data["template_ids"], sig_data["user_ids"]) if uid == uid_map.get(u2["username"])][:1])
+                    if t1 and t2:
+                        sc = match_templates(t1[0], t2[0])
+                        stat = "OK" if sc > 0.45 else "WARN"
+                        cross_matches.append((f"{u1['username']} vs {u2['username']}", sc, stat))
 
-    return {"self_matches": self_matches, "cross_matches": cross_matches}
+        return {"self_matches": self_matches, "cross_matches": cross_matches}
+
+    return await run_in_threadpool(_compute_report)
 
 
 # Serve Frontend Static Assets

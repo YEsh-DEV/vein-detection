@@ -702,6 +702,43 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Live Camera Viewport — shown during enrollment */}
+              <div className="bg-white border-[3px] border-black rounded-3xl p-4 shadow-[6px_6px_0px_#121212] relative overflow-hidden flex flex-col items-center">
+                <div className="relative w-52 h-48 rounded-2xl border-[3px] border-black shadow-[4px_4px_0px_#121212] overflow-hidden bg-black flex items-center justify-center my-1.5">
+                  {cameraReady ? (
+                    <img
+                      src="/api/video_feed"
+                      alt="Live Camera Feed"
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <div className="text-center p-3 text-white">
+                      <PalmIcon className="w-12 h-12 text-[#FFDE59] mx-auto mb-1" />
+                      <span className="text-[10px] font-black">CONNECT PI CAMERA</span>
+                    </div>
+                  )}
+
+                  {/* Countdown overlay during 5s timer */}
+                  {enrollCountdown !== null && (
+                    <div className="absolute inset-0 bg-black/40 flex flex-col items-center justify-center animate-fadeIn">
+                      <span className="font-display font-black text-6xl text-[#FFDE59] drop-shadow-[2px_2px_0px_#000] animate-bounce">
+                        {enrollCountdown}
+                      </span>
+                      <span className="text-[11px] font-black text-white bg-black/80 px-2 py-0.5 rounded-md mt-1">
+                        HOLD STEADY
+                      </span>
+                    </div>
+                  )}
+
+                  {isCapturingSample && (
+                    <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center animate-fadeIn text-white">
+                      <RefreshCw className="w-8 h-8 animate-spin text-[#38BDF8] mb-1" />
+                      <span className="text-xs font-black text-[#CCFF00]">CAPTURING...</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+
               {/* 5-Second Timer Action Button */}
               <div className="space-y-2.5">
                 <button
@@ -877,6 +914,20 @@ export default function App() {
                 </div>
                 <Database className="w-6 h-6 text-black" />
               </div>
+
+              <button
+                onClick={async () => {
+                  if (!window.confirm('DELETE ALL enrolled users and templates? This cannot be undone.')) return;
+                  const res = await fetch('/api/database/reset', { method: 'DELETE' });
+                  if (res.ok) {
+                    showToast('Database cleared. Re-enroll using live camera.', 'warn');
+                    loadUsers();
+                  }
+                }}
+                className="w-full py-3 bg-[#FF4081] text-white border-[3px] border-black rounded-2xl shadow-[4px_4px_0px_#121212] font-display font-black text-sm neo-btn"
+              >
+                🗑️ RESET DATABASE (Clear All Users)
+              </button>
             </div>
           )}
         </main>

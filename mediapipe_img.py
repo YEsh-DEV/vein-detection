@@ -1,64 +1,29 @@
 #!/usr/bin/env python3
 """
-Palm Vein ROI Extraction Pipeline -- MediaPipe Hand-Landmark Version
-======================================================================
-
-WHY THIS REPLACES THE CONVEXITY-DEFECT APPROACH
--------------------------------------------------
-The original contour-defect method reads Pv1/Pv2 (index-middle and
-ring-little "valleys") off the concavity DEPTH of the hand's silhouette.
-That depth is directly proportional to how far apart your fingers are
-spread: closed fingers -> shallow/undetectable valleys -> unstable or
-missing landmarks -> ROI jumps around between captures of the same hand.
-
-This version replaces that geometry entirely with MediaPipe Hands, a
-model trained to regress 21 hand-joint positions directly from the image.
-It does not care whether your fingers are spread or together, and it is
-far less sensitive to wrist/forearm framing, shadows, or rotation --
-because it's predicting anatomical joints, not measuring silhouette
-concavity.
-
-Landmark index reference (MediaPipe Hands, 21 points):
-    0  = wrist
-    5  = index MCP knuckle     9  = middle MCP knuckle
-    13 = ring MCP knuckle      17 = pinky MCP knuckle
-(MCP = the knuckle where the finger meets the palm -- these sit right at
-the base of each finger, exactly where the inter-finger valleys are.)
-
-  Pv1 (index-middle valley) ~= midpoint(landmark 5, landmark 9)
-  Pv2 (ring-little valley)  ~= midpoint(landmark 13, landmark 17)
-
-SETUP (do this once, on a machine with normal internet access):
-
-    pip install mediapipe opencv-python
-
-    # Download the hand landmark model (~ a few MB):
-    curl -L -o hand_landmarker.task \\
-      https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task
-
-Usage:
-    python3 mediapipe_img.py path/to/hand_image.jpg [path/to/hand_landmarker.task]
+mediapipe_img.py
+-----------------
+MediaPipe Hand Landmark Detection & Canonical ROI Extraction.
+Replaces contour convexity defects with 21 anatomical joint landmarks.
 """
 
-import sys
 import os
+import sys
 import cv2
 import numpy as np
+import urllib.request
 
 import mediapipe as mp
 from mediapipe.tasks.python import BaseOptions
 from mediapipe.tasks.python.vision import HandLandmarker, HandLandmarkerOptions, RunningMode
 
 DEFAULT_MODEL_PATH = "hand_landmarker.task"
-
-
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
 
-def ensure_model_exists(model_path=DEFAULT_MODEL_PATH):
-    """Checks if the MediaPipe model exists, downloading it automatically if missing."""
+
+def ensure_model_exists(model_path: str = DEFAULT_MODEL_PATH) -> str:
+    """Checks if MediaPipe model exists, downloading it automatically if missing."""
     if not os.path.exists(model_path):
         print(f"[*] MediaPipe model '{model_path}' not found. Downloading (~8MB)...")
-        import urllib.request
         os.makedirs(os.path.dirname(os.path.abspath(model_path)), exist_ok=True)
         try:
             urllib.request.urlretrieve(MODEL_URL, model_path)
@@ -72,13 +37,8 @@ def ensure_model_exists(model_path=DEFAULT_MODEL_PATH):
     return model_path
 
 
-# ---------- Stage 0: Landmarker factory (call ONCE at startup) ----------
-
-def build_landmarker(model_path=DEFAULT_MODEL_PATH):
-    """
-    Creates and returns a persistent HandLandmarker instance.
-    Call this ONCE at application startup.
-    """
+def build_landmarker(model_path: str = DEFAULT_MODEL_PATH) -> HandLandmarker:
+    """Creates and returns a persistent HandLandmarker instance."""
     ensure_model_exists(model_path)
     options = HandLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=model_path),
@@ -89,14 +49,10 @@ def build_landmarker(model_path=DEFAULT_MODEL_PATH):
     return HandLandmarker.create_from_options(options)
 
 
-# ---------- Stage 1: Hand Landmark Detection ----------
-
-def detect_hand_landmarks(gray_img, landmarker):
+def detect_hand_landmarks(gray_img: np.ndarray, landmarker) -> list:
     """
-    Runs MediaPipe HandLandmarker on the image and returns all 21 (x, y)
-    pixel coordinates for the first detected hand.
-
-    landmarker: an already-created HandLandmarker instance or model_path string.
+    Runs MediaPipe HandLandmarker and returns all 21 (x, y) coordinates.
+    Accepts either an active HandLandmarker instance or a model_path string.
     """
     if gray_img.shape[0] < 200 or gray_img.shape[1] < 200:
         raise ValueError(
@@ -104,7 +60,6 @@ def detect_hand_landmarks(gray_img, landmarker):
             f"Minimum 200x200 required."
         )
 
-    # Support passing model_path string or HandLandmarker object
     if isinstance(landmarker, str):
         landmarker = build_landmarker(landmarker)
 
@@ -119,10 +74,11 @@ def detect_hand_landmarks(gray_img, landmarker):
     return [(int(lm.x * w), int(lm.y * h)) for lm in result.hand_landmarks[0]]
 
 
-def extract_valleys_from_landmarks(landmarks_px):
+def extract_valleys_from_landmarks(landmarks_px: list) -> tuple:
     """
-    Derives Pv1 (index-middle) and Pv2 (ring-little) from MCP knuckle
-    landmarks. Stable regardless of finger spread, unlike contour defects.
+    Derives Pv1 (index-middle) and Pv2 (ring-little) from MCP knuckle landmarks.
+    Pv1 = midpoint(Landmark 5, Landmark 9)
+    Pv2 = midpoint(Landmark 13, Landmark 17)
     """
     index_mcp  = np.array(landmarks_px[5],  dtype=float)
     middle_mcp = np.array(landmarks_px[9],  dtype=float)
@@ -131,16 +87,11 @@ def extract_valleys_from_landmarks(landmarks_px):
 
     pv1 = tuple(((index_mcp + middle_mcp) / 2.0).astype(int))
     pv2 = tuple(((ring_mcp  + pinky_mcp)  / 2.0).astype(int))
-
     return pv1, pv2
 
 
-# ---------- Stage 1b: Hand Silhouette (still needed for ROI direction check) ----------
-
-def segment_hand(gray_img):
-    """Unchanged from the original pipeline -- still used to find the
-    palm's distance-transform peak for choosing which side of the
-    Pv1-Pv2 baseline the ROI should be cropped toward."""
+def segment_hand(gray_img: np.ndarray) -> np.ndarray:
+    """Binary segmentation of the hand silhouette for distance transform analysis."""
     norm    = cv2.normalize(gray_img, None, 0, 255, cv2.NORM_MINMAX)
     blurred = cv2.GaussianBlur(norm, (11, 11), 0)
     _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -167,10 +118,13 @@ def segment_hand(gray_img):
     return filled
 
 
-# ---------- Stage 2: Coordinate Alignment & Scaled ROI Extraction ----------
-
-def extract_ma2017_scaled_roi(gray_img, pv1, pv2, binary_mask, target_size=256,
-                               scale_factor=1.5, offset_factor=0.35):
+def extract_ma2017_scaled_roi(gray_img: np.ndarray, pv1: tuple, pv2: tuple,
+                               binary_mask: np.ndarray, target_size: int = 256,
+                               scale_factor: float = 1.5,
+                               offset_factor: float = 0.35) -> tuple:
+    """
+    Extracts canonical 256x256 pixel Region of Interest (ROI) based on Ma et al. (2017).
+    """
     dx = pv2[0] - pv1[0]
     dy = pv2[1] - pv1[1]
     dist_pv   = np.hypot(dx, dy)
@@ -192,7 +146,7 @@ def extract_ma2017_scaled_roi(gray_img, pv1, pv2, binary_mask, target_size=256,
     _, _, _, max_loc = cv2.minMaxLoc(dist_map)
     direction     = 1 if max_loc[1] > my_r else -1
 
-    L        = int(dist_pv * scale_factor)
+    L         = int(dist_pv * scale_factor)
     offset_d0 = int(dist_pv * offset_factor)
 
     x1 = int(mx_r - L / 2)
@@ -218,71 +172,10 @@ def extract_ma2017_scaled_roi(gray_img, pv1, pv2, binary_mask, target_size=256,
     return roi_normalized, (x1, y1, x2, y2), rotated_gray
 
 
-# ---------- Stage 3: Vascular Feature Enhancement ----------
-
-def enhance_roi_vessels(roi_img):
-    """
-    Applies bilateral filter + CLAHE to enhance vein contrast.
-    Returns only the CLAHE-enhanced ROI (clahe_roi).
-    """
+def enhance_roi_vessels(roi_img: np.ndarray) -> np.ndarray:
+    """Applies bilateral filter + CLAHE to enhance sub-dermal vein contrast."""
     stretched   = cv2.normalize(roi_img, None, 0, 255, cv2.NORM_MINMAX)
     smooth      = cv2.bilateralFilter(stretched, d=7, sigmaColor=35, sigmaSpace=35)
     clahe       = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(16, 16))
     clahe_roi   = clahe.apply(smooth)
     return clahe_roi
-
-
-# ---------- Main ----------
-
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: python3 mediapipe_img.py <path_to_image> [model_path]")
-        sys.exit(1)
-
-    img_path   = sys.argv[1]
-    model_path = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_MODEL_PATH
-
-    if not os.path.exists(img_path):
-        print(f"Error: File '{img_path}' does not exist.")
-        sys.exit(1)
-
-    raw_gray = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-    if raw_gray is None:
-        print(f"Error: Unable to decode image from '{img_path}'.")
-        sys.exit(1)
-
-    base_name = os.path.splitext(os.path.basename(img_path))[0]
-
-    try:
-        stretched_raw = cv2.normalize(raw_gray, None, 0, 255, cv2.NORM_MINMAX)
-
-        # Build a persistent landmarker for this standalone run.
-        landmarker = build_landmarker(model_path)
-
-        # 1. Landmark-based valley detection (replaces convexity defects)
-        landmarks_px = detect_hand_landmarks(stretched_raw, landmarker)
-        pv1, pv2 = extract_valleys_from_landmarks(landmarks_px)
-
-        # 2. Silhouette used internally for palm-side direction checking.
-        hand_mask = segment_hand(stretched_raw)
-
-        # 3. Scaled ROI.
-        roi_256, box, rotated_img = extract_ma2017_scaled_roi(
-            stretched_raw, pv1, pv2, hand_mask,
-            target_size=256, scale_factor=1.5, offset_factor=0.35
-        )
-
-        # 4. CLAHE preprocessing. Returns only the CLAHE ROI.
-        clahe_roi = enhance_roi_vessels(roi_256)
-        cv2.imwrite(f"{base_name}_roi_clahe.png", clahe_roi)
-
-        print(f"Pipeline executed successfully for '{img_path}':")
-        print(f" - Landmark Valleys: Pv1={pv1}, Pv2={pv2}")
-
-    except (ValueError, FileNotFoundError) as err:
-        print(f"Pipeline failed: {err}")
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()

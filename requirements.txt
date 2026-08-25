@@ -1,25 +1,7 @@
-# ==============================================================================
-# Palm Vein Biometric Authentication System
-# Dependencies for Development (Windows/macOS/Linux) and Raspberry Pi 5 Deployment
-# ==============================================================================
-
-# --- Computer Vision & Biometric Pipeline ---
-opencv-python>=4.8.0.76         # Hand ROI alignment, CLAHE contrast enhancement, Gabor filtering
-mediapipe>=0.10.9               # Palm landmark localization & tracking
-numpy>=1.24.0,<2.0.0            # Array operations, VeinCode binary matrices, vector signatures
-scipy>=1.11.0                   # Fast multidimensional convolution & spatial filtering
-
-# --- Backend Web Server & REST API (FastAPI) ---
-fastapi>=0.110.0                # High-performance asynchronous REST API framework
-uvicorn[standard]>=0.28.0       # ASGI production server for FastAPI
-pydantic>=2.6.0                 # API request/response data validation schemas
-python-multipart>=0.0.9         # Form data & multipart file upload support
-
-# --- Graphical User Interface & Pygame Fallback ---
-pygame>=2.5.0                   # Standalone desktop/touchscreen UI fallback (ui.py)
-
-# ------------------------------------------------------------------------------
-# NOTE FOR RASPBERRY PI 5 USERS:
-# The Pi NoIR camera driver 'picamera2' is installed via apt package manager:
-#   sudo apt install -y python3-picamera2 python3-libcamera
-# ------------------------------------------------------------------------------
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+opencv-python>=4.10.0
+numpy>=1.26.0
+scipy>=1.14.0
+mediapipe>=0.10.0
+pillow>=11.0.0
