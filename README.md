@@ -49,6 +49,27 @@ python3 cam_test.py
 
 ---
 
+## 📸 Raw Dataset Sample Collector (`collect_samples.py`)
+
+For collecting high-resolution raw palm captures without ROI cropping or Gabor encoding (useful for fine-tuning preprocessing models, dataset curation, and training):
+
+```bash
+python3 collect_samples.py
+```
+
+### Key Controls:
+- **`SPACE` / `C`**: Instant single capture
+- **`B`**: Automated 6-sample guided batch capture (with 4s countdowns)
+- **`H`**: Toggle Hand (Right ⟷ Left)
+- **`U`**: Switch Subject / Person Name
+- **`[` / `]`**: Adjust Exposure Time (darker / brighter for NIR illumination)
+- **`L`**: Display dataset collection statistics and paths
+- **`Q` / `ESC`**: Quit
+
+Saves raw PNG images to `dataset/<subject_name>/` and metadata to `dataset/dataset_log.csv`.
+
+---
+
 ## 🌐 Web Server & UI Mode (`server.py`)
 
 ```bash
