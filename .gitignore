@@ -19,6 +19,7 @@ env/
 data/
 captures/
 roi_clahe/
+dataset/
 database/
 *.db
 *.db-shm
