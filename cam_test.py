@@ -31,6 +31,24 @@ from mediapipe_img import (
 )
 from gabor import extract_veincode, match_templates, MATCH_THRESHOLD
 
+CAPTURE_DIR = "captures"
+ROI_DIR = "roi_clahe"
+os.makedirs(CAPTURE_DIR, exist_ok=True)
+os.makedirs(ROI_DIR, exist_ok=True)
+
+
+def save_capture_to_disk(gray: np.ndarray, roi: np.ndarray, username: str, mode: str, idx: int = 0):
+    """Save raw capture and CLAHE ROI to captures/ and roi_clahe/."""
+    try:
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        cap_name = f"{username}_{mode}_{idx}_{ts}.png" if mode == "enroll" else f"{username}_{mode}_{ts}.png"
+        roi_name = f"{username}_{mode}_{idx}_{ts}_clahe.png" if mode == "enroll" else f"{username}_{mode}_{ts}_clahe.png"
+        cv2.imwrite(os.path.join(CAPTURE_DIR, cap_name), gray)
+        cv2.imwrite(os.path.join(ROI_DIR, roi_name), roi)
+    except Exception as e:
+        print(f"[!] Warning: Failed saving capture to disk: {e}")
+
+
 POSITION_HINTS = [
     "FLAT — hold palm flat, centered, 10-15cm above camera",
     "TILT LEFT — tilt palm ~5 degrees to the left",
@@ -278,7 +296,8 @@ def do_enroll(cam, cam_type, preview_cfg, still_cfg, landmarker, engine):
 
         elapsed = time.time() - t0
         veincode_list.append(code)
-        print(f"  OK — VR mean: {code['VR'].mean():.3f}  ({elapsed:.2f}s)")
+        save_capture_to_disk(gray, clahe_roi, username, "enroll", idx=i+1)
+        print(f"  OK — VR mean: {code['VR'].mean():.3f}  ({elapsed:.2f}s) [Saved to captures/ and roi_clahe/]")
 
         # Show the CLAHE ROI so user can see what was captured
         display_roi = cv2.resize(clahe_roi, (320, 320))
@@ -352,6 +371,7 @@ def do_scan(cam, cam_type, preview_cfg, still_cfg, landmarker, engine):
         return
 
     pipeline_time = time.time() - t0
+    save_capture_to_disk(gray, clahe_roi, "unknown", "scan")
 
     # Show CLAHE ROI
     display_roi = cv2.resize(clahe_roi, (320, 320))
@@ -381,6 +401,8 @@ def do_scan(cam, cam_type, preview_cfg, still_cfg, landmarker, engine):
     print(f"  Total:      {total_time:.2f}s")
     print("=" * 50)
 
+    if username:
+        save_capture_to_disk(gray, clahe_roi, username, "scan")
     log_access(user_id=None, score=score, accepted=(username is not None))
 
 
