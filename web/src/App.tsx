@@ -15,10 +15,13 @@ import {
   ShieldCheck,
   Sparkles,
   Database,
-  Lock
+  Lock,
+  Cpu,
+  Layers
 } from 'lucide-react';
 
 type AppState = 'idle' | 'scan' | 'enroll';
+type CameraState = 'connecting' | 'live' | 'error';
 
 interface ScanResult {
   accepted: boolean;
@@ -68,6 +71,87 @@ function PalmIcon({ className = "w-12 h-12 text-black", animated = false }: { cl
   );
 }
 
+// ── Reusable Camera Viewport with 3 Explicit Visual States ──
+function CameraViewport({
+  cameraState,
+  cameraErrorDetail,
+  onRetry,
+  children,
+  className = "w-full h-full min-h-[340px]",
+  showLiveTag = true,
+}: {
+  cameraState: CameraState;
+  cameraErrorDetail?: string;
+  onRetry?: () => void;
+  children?: React.ReactNode;
+  className?: string;
+  showLiveTag?: boolean;
+}) {
+  return (
+    <div className={`relative rounded-2xl border-[3px] border-black shadow-[4px_4px_0px_#121212] overflow-hidden bg-black flex items-center justify-center ${className}`}>
+      
+      {/* STATE 1: CONNECTING */}
+      {cameraState === 'connecting' && (
+        <div className="flex flex-col items-center justify-center text-center p-5 text-white animate-pulse space-y-2.5">
+          <div className="w-12 h-12 rounded-2xl bg-[#1e1e1e] border-[2px] border-[#FFDE59] flex items-center justify-center">
+            <RefreshCw className="w-6 h-6 animate-spin text-[#FFDE59]" />
+          </div>
+          <span className="font-display font-black text-xs uppercase tracking-wider text-[#FFDE59]">
+            CONNECTING TO CAMERA...
+          </span>
+          <span className="text-[10px] text-[#aaa] font-bold">
+            Initializing Picamera2 / V4L2 pipeline
+          </span>
+        </div>
+      )}
+
+      {/* STATE 2: LIVE */}
+      {cameraState === 'live' && (
+        <>
+          <img 
+            src="/api/video_feed" 
+            alt="Live Camera Feed" 
+            className="w-full h-full object-cover"
+          />
+          {showLiveTag && (
+            <div className="absolute top-2.5 right-2.5 px-2 py-0.5 bg-[#121212]/85 border-[1.5px] border-[#CCFF00] rounded-md text-[9px] font-mono font-black text-[#CCFF00] flex items-center gap-1.5 shadow-sm">
+              <span className="w-1.5 h-1.5 rounded-full bg-[#CCFF00] animate-pulse" />
+              <span>LIVE</span>
+            </div>
+          )}
+        </>
+      )}
+
+      {/* STATE 3: ERROR / DETACHED */}
+      {cameraState === 'error' && (
+        <div className="flex flex-col items-center justify-center text-center p-5 bg-[#250404] text-white w-full h-full space-y-2">
+          <div className="w-11 h-11 rounded-2xl bg-[#FF4081] border-[2px] border-black flex items-center justify-center shadow-[2px_2px_0px_#121212]">
+            <AlertTriangle className="w-6 h-6 text-white" />
+          </div>
+          <span className="font-display font-black text-xs uppercase tracking-wider text-[#FF4081]">
+            CAMERA HARDWARE NOT DETECTED
+          </span>
+          <p className="text-[10px] font-bold text-[#FFB0B0] max-w-[240px] leading-tight">
+            {cameraErrorDetail || "Camera not detected — check CSI cable on Raspberry Pi 5."}
+          </p>
+          {onRetry && (
+            <button
+              onClick={onRetry}
+              className="mt-1 px-3 py-1 bg-[#FFDE59] text-black border-[2px] border-black rounded-xl text-[10px] font-black shadow-[2px_2px_0px_#121212] neo-btn flex items-center gap-1"
+            >
+              <RefreshCw className="w-3 h-3" />
+              <span>Retry Camera</span>
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Overlaid UI (Countdowns, status badges, spinners) */}
+      {children}
+    </div>
+  );
+}
+
 const SAMPLE_GUIDANCE = [
   "Step 1: Hold palm flat, centered ~10-15cm above sensor",
   "Step 2: Tilt palm slightly to the LEFT (~5 degrees)",
@@ -81,7 +165,9 @@ export default function App() {
   // 3-Screen State Machine
   const [appState, setAppState] = useState<AppState>('idle');
 
-  // Hardware Status
+  // Camera & Hardware Status with 3 Explicit States
+  const [cameraState, setCameraState] = useState<CameraState>('connecting');
+  const [cameraErrorDetail, setCameraErrorDetail] = useState<string>('');
   const [cameraReady, setCameraReady] = useState(false);
   const [cameraType, setCameraType] = useState('Checking...');
   const [totalUsers, setTotalUsers] = useState(0);
@@ -129,13 +215,28 @@ export default function App() {
       const res = await fetch('/api/status');
       if (res.ok) {
         const data = await res.json();
-        setCameraReady(data.camera_available ?? false);
+        const available = Boolean(data.camera_available);
+        setCameraReady(available);
         setCameraType(data.camera_type || 'None');
         setTotalUsers(data.users_count || 0);
+
+        if (available && data.camera_type !== 'None') {
+          setCameraState('live');
+          setCameraErrorDetail('');
+        } else {
+          setCameraState('error');
+          setCameraErrorDetail('Camera not detected — check CSI cable on Raspberry Pi 5.');
+        }
+      } else {
+        setCameraReady(false);
+        setCameraState('error');
+        setCameraErrorDetail(`Server error: HTTP ${res.status}`);
       }
     } catch {
       setCameraReady(false);
       setCameraType('Disconnected');
+      setCameraState('error');
+      setCameraErrorDetail('Cannot reach server. Ensure server.py is running.');
     }
   };
 
@@ -173,7 +274,7 @@ export default function App() {
 
   // Scan Execution with 3-Second Countdown
   const handleScanWithCountdown = async () => {
-    if (isScanning || scanCountdown !== null) return;
+    if (isScanning || scanCountdown !== null || !cameraReady) return;
     
     // 3-Second countdown with state abort check
     for (let i = 3; i > 0; i--) {
@@ -200,9 +301,9 @@ export default function App() {
 
         if (data.accepted) {
           confetti({
-            particleCount: 90,
-            spread: 75,
-            origin: { y: 0.6 },
+            particleCount: 110,
+            spread: 80,
+            origin: { y: 0.55 },
             colors: ['#FFDE59', '#38BDF8', '#FF4081', '#CCFF00', '#121212']
           });
         }
@@ -216,7 +317,6 @@ export default function App() {
       } else {
         const err = await res.json();
         showToast(err.detail || 'Scan failed: Palm not detected', 'warn');
-        // Auto-return to idle after failed attempt after delay
         setTimeout(() => {
           setAppState('idle');
         }, 4000);
@@ -230,7 +330,7 @@ export default function App() {
 
   // Live Camera Sample Capture with 5-Second Countdown
   const handleCaptureSampleWithCountdown = async () => {
-    if (isCapturingSample || enrollCountdown !== null || enrollSamples.length >= 6) return;
+    if (isCapturingSample || enrollCountdown !== null || enrollSamples.length >= 6 || !cameraReady) return;
     const cleanUname = enrollUsername.trim().toLowerCase();
     if (!cleanUname) {
       showToast('Enter a username first!', 'warn');
@@ -299,8 +399,8 @@ export default function App() {
       if (res.ok) {
         showToast(`ENROLLED '${cleanUname}' successfully!`, 'success');
         confetti({
-          particleCount: 100,
-          spread: 80,
+          particleCount: 120,
+          spread: 85,
           origin: { y: 0.5 },
           colors: ['#FFDE59', '#38BDF8', '#FF4081', '#CCFF00']
         });
@@ -308,7 +408,6 @@ export default function App() {
         setEnrollSamples([]);
         setEnrollStatusMsg('');
         loadStatus();
-        // Explicit transition: return to Idle
         setTimeout(() => setAppState('idle'), 1500);
       } else {
         const err = await res.json();
@@ -367,16 +466,18 @@ export default function App() {
       {/* ── KIOSK PHONE / 5" TOUCHSCREEN CONTAINER (480px) ── */}
       <div className="w-full max-w-[480px] min-h-screen sm:min-h-[854px] sm:h-[854px] bg-[#FFFDF0] border-x-0 sm:border-[4px] border-black sm:rounded-[36px] sm:shadow-[10px_10px_0px_#121212] flex flex-col relative overflow-hidden bg-neo-cream">
 
-        {/* ── MINIMAL SERVICE STATUS BAR ── */}
-        <div className="px-5 pt-3 pb-2 flex items-center justify-between text-xs font-black text-black z-20 border-b-[2px] border-black/10">
+        {/* ── CLEAN CUSTOMER-FACING SERVICE STATUS BAR (Priority 3) ── */}
+        <div className="px-5 pt-3.5 pb-2.5 flex items-center justify-between text-xs font-black text-black z-20 border-b-[2px] border-black/10">
           <div className="flex items-center gap-2">
             {/* Secret 5-tap Admin trigger on camera bead */}
             <button 
               onClick={handleSecretAdminTap}
               className="flex items-center gap-1.5 focus:outline-none"
-              title="Camera status"
+              title="Camera status (tap 5x for admin)"
             >
-              <span className={`w-3 h-3 rounded-full border-[1.5px] border-black transition-colors ${cameraReady ? 'bg-[#CCFF00]' : 'bg-[#FF4081]'}`} />
+              <span className={`w-3 h-3 rounded-full border-[1.5px] border-black transition-colors ${
+                cameraState === 'live' ? 'bg-[#CCFF00]' : cameraState === 'connecting' ? 'bg-[#FFDE59] animate-ping' : 'bg-[#FF4081]'
+              }`} />
               <span className="text-[10px] uppercase font-bold tracking-tight text-[#444]">{cameraType}</span>
             </button>
           </div>
@@ -425,14 +526,10 @@ export default function App() {
               className={`absolute inset-0 w-full h-full object-cover z-0 pointer-events-none transition-opacity duration-700 ${videoSettled ? 'opacity-0' : 'opacity-100'}`}
             />
 
-            {/* Top Badge */}
-            <div className="w-full flex justify-between items-center z-10">
-              <div className="px-3 py-1 bg-[#FFDE59] border-[2px] border-black rounded-xl text-[11px] font-black shadow-[2px_2px_0px_#121212] flex items-center gap-1.5">
-                <Sparkles className="w-3.5 h-3.5 fill-black" />
-                <span>SUB-DERMAL NIR 850nm</span>
-              </div>
-              <div className="px-2.5 py-1 bg-[#38BDF8] border-[2px] border-black rounded-xl text-[10px] font-black shadow-[2px_2px_0px_#121212]">
-                {totalUsers} ENROLLED
+            {/* Subtle Top Status Spacer */}
+            <div className="w-full flex justify-end items-center z-10">
+              <div className="px-2.5 py-1 bg-white/85 border-[2px] border-black rounded-xl text-[10px] font-black shadow-[2px_2px_0px_#121212]">
+                STANDBY READY
               </div>
             </div>
 
@@ -476,15 +573,15 @@ export default function App() {
 
         {/* ══════════════════════════════════════════════════════════════════════
             SCREEN 2: SCAN (DEFAULT HOME SCREEN AFTER IDLE)
-            - Full-bleed live camera viewport (/api/video_feed)
-            - Payment mode hardcoded to Palm Pay Auth (no mode selectors)
-            - 3s countdown → capture → result overlay → auto-return to Idle (4-5s)
+            - Full-bleed live camera viewport with explicit Connecting/Live/Error states
+            - Payment mode hardcoded to Palm Pay Auth
+            - 3s countdown → capture → result overlay → auto-return to Idle
             - Small low-emphasis icon in corner for Enroll
            ══════════════════════════════════════════════════════════════════════ */}
         {appState === 'scan' && (
           <div className="flex-1 flex flex-col p-5 space-y-4 animate-fadeIn overflow-y-auto">
             
-            {/* Minimal Header Bar: Back to Idle on left, Enroll shortcut on right */}
+            {/* Header Bar: Back to Idle on left, Enroll shortcut on right */}
             <div className="flex items-center justify-between">
               <button
                 onClick={() => setAppState('idle')}
@@ -499,7 +596,7 @@ export default function App() {
                 <span>PALM PAY AUTH</span>
               </div>
 
-              {/* Small, low-emphasis corner trigger to access Enrollment */}
+              {/* Discreet corner trigger to access Enrollment */}
               <button
                 onClick={() => setAppState('enroll')}
                 className="w-8 h-8 bg-[#F4F4F0] border-[2px] border-black rounded-xl shadow-[2px_2px_0px_#121212] flex items-center justify-center text-[#555] hover:text-black neo-btn"
@@ -509,26 +606,18 @@ export default function App() {
               </button>
             </div>
 
-            {/* Dominant Full-Bleed Live Camera Viewport Box */}
+            {/* Dominant Full-Bleed Live Camera Viewport Box (Priority 2) */}
             <div className="bg-white border-[3px] border-black rounded-3xl p-3 shadow-[6px_6px_0px_#121212] relative overflow-hidden flex flex-col items-center flex-1 justify-center">
               
-              <div className="relative w-full h-full min-h-[340px] rounded-2xl border-[3px] border-black shadow-[4px_4px_0px_#121212] overflow-hidden bg-black flex items-center justify-center">
-                {cameraReady ? (
-                  <img 
-                    src="/api/video_feed" 
-                    alt="Live Camera Feed" 
-                    className="w-full h-full object-cover"
-                  />
-                ) : (
-                  <div className="text-center p-4 text-white">
-                    <PalmIcon className="w-14 h-14 text-[#FFDE59] mx-auto mb-2" />
-                    <span className="text-xs font-black uppercase">CAMERA OFFLINE</span>
-                  </div>
-                )}
-
+              <CameraViewport 
+                cameraState={cameraState}
+                cameraErrorDetail={cameraErrorDetail}
+                onRetry={loadStatus}
+                className="w-full h-full min-h-[340px]"
+              >
                 {/* 3-Second Countdown Overlay */}
                 {scanCountdown !== null && (
-                  <div className="absolute inset-0 bg-black/45 flex flex-col items-center justify-center animate-fadeIn">
+                  <div className="absolute inset-0 bg-black/45 flex flex-col items-center justify-center animate-fadeIn z-10">
                     <span className="font-display font-black text-7xl text-[#FFDE59] drop-shadow-[3px_3px_0px_#000] animate-bounce">
                       {scanCountdown}
                     </span>
@@ -540,28 +629,44 @@ export default function App() {
 
                 {/* Processing Overlay */}
                 {isScanning && (
-                  <div className="absolute inset-0 bg-black/65 flex flex-col items-center justify-center animate-fadeIn text-white">
+                  <div className="absolute inset-0 bg-black/65 flex flex-col items-center justify-center animate-fadeIn text-white z-10">
                     <RefreshCw className="w-10 h-10 animate-spin text-[#38BDF8] mb-2" />
                     <span className="text-sm font-black text-[#CCFF00] tracking-wider">AUTHENTICATING...</span>
                   </div>
                 )}
-              </div>
+              </CameraViewport>
 
               {/* Status Bead Indicator */}
               <div className="mt-2.5 text-center">
                 <span className={`inline-block px-4 py-1 rounded-full text-xs font-black border-[2px] border-black shadow-[2px_2px_0px_#121212] ${
-                  scanCountdown !== null ? 'bg-[#FFDE59] text-black animate-pulse' : isScanning ? 'bg-[#FF7A00] text-white' : cameraReady ? 'bg-[#CCFF00]' : 'bg-[#FF4081] text-white'
+                  scanCountdown !== null 
+                    ? 'bg-[#FFDE59] text-black animate-pulse' 
+                    : isScanning 
+                    ? 'bg-[#FF7A00] text-white' 
+                    : cameraState === 'live' 
+                    ? 'bg-[#CCFF00]' 
+                    : cameraState === 'connecting'
+                    ? 'bg-[#FFDE59] text-black'
+                    : 'bg-[#FF4081] text-white'
                 }`}>
-                  {scanCountdown !== null ? `ALIGNING PALM (${scanCountdown}s)...` : isScanning ? 'MATCHING VEIN PATTERN...' : cameraReady ? 'READY FOR PALM AUTH' : 'CAMERA DISCONNECTED'}
+                  {scanCountdown !== null 
+                    ? `ALIGNING PALM (${scanCountdown}s)...` 
+                    : isScanning 
+                    ? 'MATCHING VEIN PATTERN...' 
+                    : cameraState === 'live' 
+                    ? 'READY FOR PALM AUTH' 
+                    : cameraState === 'connecting'
+                    ? 'CONNECTING TO CAMERA...'
+                    : 'CAMERA DISCONNECTED'}
                 </span>
               </div>
             </div>
 
-            {/* Primary Action Button */}
+            {/* Primary Action Button (Priority 5 Disabled Contrast Pass) */}
             <button
               onClick={handleScanWithCountdown}
-              disabled={isScanning || scanCountdown !== null || !cameraReady}
-              className="w-full py-4 bg-[#FFDE59] border-[3px] border-black rounded-2xl shadow-[5px_5px_0px_#121212] font-display font-black text-lg flex items-center justify-center gap-3 neo-btn hover:bg-[#ffe26b] disabled:opacity-50"
+              disabled={isScanning || scanCountdown !== null || cameraState !== 'live'}
+              className="w-full py-4 bg-[#FFDE59] text-black border-[3px] border-black rounded-2xl shadow-[5px_5px_0px_#121212] font-display font-black text-lg flex items-center justify-center gap-3 neo-btn hover:bg-[#ffe26b] disabled:bg-[#E2E8F0] disabled:text-[#888888] disabled:border-[#888888] disabled:shadow-none disabled:cursor-not-allowed disabled:transform-none"
             >
               {scanCountdown !== null ? (
                 <>
@@ -572,6 +677,11 @@ export default function App() {
                 <>
                   <RefreshCw className="w-6 h-6 animate-spin" />
                   <span>READING SENSOR...</span>
+                </>
+              ) : cameraState !== 'live' ? (
+                <>
+                  <AlertTriangle className="w-5 h-5 text-[#888]" />
+                  <span>CAMERA OFFLINE</span>
                 </>
               ) : (
                 <>
@@ -685,18 +795,18 @@ export default function App() {
               </div>
             </div>
 
-            {/* Mini Camera Feed during Positioning */}
+            {/* Mini Camera Feed during Positioning (Priority 2) */}
             <div className="bg-white border-[3px] border-black rounded-2xl p-3 shadow-[4px_4px_0px_#121212] relative overflow-hidden flex flex-col items-center">
-              <div className="relative w-44 h-36 rounded-xl border-[2.5px] border-black overflow-hidden bg-black flex items-center justify-center">
-                {cameraReady ? (
-                  <img src="/api/video_feed" alt="Camera Feed" className="w-full h-full object-cover" />
-                ) : (
-                  <span className="text-[10px] text-white font-black">CAMERA OFFLINE</span>
-                )}
-
+              <CameraViewport
+                cameraState={cameraState}
+                cameraErrorDetail={cameraErrorDetail}
+                onRetry={loadStatus}
+                className="w-48 h-36"
+                showLiveTag={false}
+              >
                 {/* 5-Second Timer Overlay */}
                 {enrollCountdown !== null && (
-                  <div className="absolute inset-0 bg-black/45 flex flex-col items-center justify-center">
+                  <div className="absolute inset-0 bg-black/45 flex flex-col items-center justify-center z-10">
                     <span className="font-display font-black text-5xl text-[#FFDE59] drop-shadow-[2px_2px_0px_#000] animate-bounce">
                       {enrollCountdown}
                     </span>
@@ -707,18 +817,18 @@ export default function App() {
                 )}
 
                 {isCapturingSample && (
-                  <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center text-white">
+                  <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center text-white z-10">
                     <RefreshCw className="w-7 h-7 animate-spin text-[#38BDF8]" />
                   </div>
                 )}
-              </div>
+              </CameraViewport>
             </div>
 
-            {/* 5-Second Countdown Capture Button */}
+            {/* 5-Second Countdown Capture Button (Priority 5 Disabled Contrast Pass) */}
             <button
               onClick={handleCaptureSampleWithCountdown}
-              disabled={isCapturingSample || enrollCountdown !== null || enrollSamples.length >= 6 || !enrollUsername.trim() || !cameraReady}
-              className={`w-full py-3.5 border-[3px] border-black rounded-xl shadow-[3px_3px_0px_#121212] font-display font-black text-sm flex items-center justify-center gap-2 neo-btn disabled:opacity-50 ${
+              disabled={isCapturingSample || enrollCountdown !== null || enrollSamples.length >= 6 || !enrollUsername.trim() || cameraState !== 'live'}
+              className={`w-full py-3.5 border-[3px] border-black rounded-xl shadow-[3px_3px_0px_#121212] font-display font-black text-sm flex items-center justify-center gap-2 neo-btn disabled:bg-[#E2E8F0] disabled:text-[#888888] disabled:border-[#888888] disabled:shadow-none disabled:cursor-not-allowed disabled:transform-none ${
                 enrollCountdown !== null ? 'bg-[#FFDE59] text-black animate-pulse' : 'bg-[#FF4081] text-white hover:bg-[#ff2872]'
               }`}
             >
@@ -742,14 +852,14 @@ export default function App() {
               )}
             </button>
 
-            {/* Save Enrollment Button (requires >= 3 samples) */}
+            {/* Save Enrollment Button (requires >= 3 samples) (Priority 5 Disabled Contrast Pass) */}
             <button
               onClick={handleSaveEnrollment}
               disabled={enrollSamples.length < 3 || !enrollUsername.trim()}
-              className="w-full py-3 bg-[#CCFF00] text-black border-[3px] border-black rounded-xl shadow-[3px_3px_0px_#121212] font-display font-black text-xs flex items-center justify-center gap-2 neo-btn hover:bg-[#b8e600] disabled:opacity-40"
+              className="w-full py-3 bg-[#CCFF00] text-black border-[3px] border-black rounded-xl shadow-[3px_3px_0px_#121212] font-display font-black text-xs flex items-center justify-center gap-2 neo-btn hover:bg-[#b8e600] disabled:bg-[#E2E8F0] disabled:text-[#888888] disabled:border-[#888888] disabled:shadow-none disabled:cursor-not-allowed disabled:transform-none"
             >
               <CheckCircle2 className="w-4 h-4" />
-              <span>SAVE TO DATABASE ({enrollSamples.length} SAMPLES)</span>
+              <span>SAVE TO DATABASE ({enrollSamples.length}/6 SAMPLES)</span>
             </button>
 
             {/* Dynamic Posture Guidance Banner */}
@@ -770,59 +880,91 @@ export default function App() {
         )}
 
         {/* ══════════════════════════════════════════════════════════════════════
-            FULLSCREEN RESULT OVERLAY (FOR SCAN RESULTS)
+            FULLSCREEN RESULT OVERLAY (PAYMENT SUCCESS / FAIL MOMENT - Priority 4)
             - Pops up on successful/failed authentication
-            - Displays confidence gauge and user name
+            - Neobrutalist celebration treatment: Confetti, hard shadows, lime/pink
+            - Shows: Matched username, Confidence/MNHD score, Latency, Checkmark
             - Auto-dismisses and returns to Idle after 4.5s
            ══════════════════════════════════════════════════════════════════════ */}
         {resultOverlay && (
           <div className={`absolute inset-0 z-50 p-6 flex flex-col items-center justify-center animate-fadeIn ${
             resultOverlay.accepted ? 'bg-[#38BDF8]' : 'bg-[#FF4081]'
           }`}>
-            <div className="w-full bg-white border-[4px] border-black rounded-3xl p-6 shadow-[8px_8px_0px_#121212] text-center space-y-4">
-              <div className={`w-20 h-20 mx-auto rounded-full border-[3px] border-black shadow-[4px_4px_0px_#121212] flex items-center justify-center font-display font-black text-3xl ${
-                resultOverlay.accepted ? 'bg-[#CCFF00]' : 'bg-[#FF4081] text-white'
-              }`}>
-                {resultOverlay.accepted ? '✓' : '✕'}
+            <div className="w-full bg-[#FFFDF0] border-[4px] border-black rounded-3xl p-6 shadow-[10px_10px_0px_#121212] text-center space-y-4 neo-card">
+              
+              {/* Giant Illuminated Status Icon */}
+              <div className="relative mx-auto w-24 h-24">
+                <div className={`w-24 h-24 rounded-3xl border-[4px] border-black shadow-[5px_5px_0px_#121212] flex items-center justify-center font-display font-black text-5xl animate-float ${
+                  resultOverlay.accepted ? 'bg-[#CCFF00] text-black' : 'bg-[#FF4081] text-white'
+                }`}>
+                  {resultOverlay.accepted ? '✓' : '✕'}
+                </div>
+                {resultOverlay.accepted && (
+                  <div className="absolute -top-2 -right-2 px-2 py-0.5 bg-[#FFDE59] border-[2px] border-black rounded-lg text-[9px] font-black uppercase shadow-[2px_2px_0px_#121212] animate-bounce">
+                    VERIFIED
+                  </div>
+                )}
               </div>
 
-              <div>
-                <h3 className="font-display font-black text-2xl tracking-tight uppercase">
-                  {resultOverlay.accepted ? 'PALM AUTH VERIFIED' : 'NOT RECOGNISED'}
+              {/* Headline & User Name */}
+              <div className="space-y-1">
+                <h3 className="font-display font-black text-2xl tracking-tight uppercase leading-tight">
+                  {resultOverlay.accepted ? 'PAYMENT AUTHORIZED' : 'PAYMENT REJECTED'}
                 </h3>
-                <p className="font-bold text-xs text-[#444] mt-1">
+                <p className="font-bold text-xs text-[#555]">
                   {resultOverlay.accepted 
-                    ? `Payment token confirmed for '${resultOverlay.username}'`
-                    : 'Palm vascular pattern not recognized in database'}
+                    ? `Vascular identity token confirmed for '${resultOverlay.username}'`
+                    : 'Sub-dermal vein pattern could not be recognized'}
                 </p>
               </div>
 
-              {/* Confidence Gauge */}
-              <div className="bg-[#FFFDF0] border-[2px] border-black rounded-xl p-3 shadow-[2px_2px_0px_#121212] space-y-1 text-left">
-                <div className="flex justify-between text-xs font-black">
-                  <span>MNHD SCORE</span>
-                  <span>{resultOverlay.score.toFixed(4)}</span>
+              {/* High-Impact Telemetry Card */}
+              <div className="bg-white border-[2.5px] border-black rounded-2xl p-3.5 shadow-[3px_3px_0px_#121212] space-y-2 text-left">
+                
+                <div className="flex justify-between items-center text-xs font-black">
+                  <span className="text-[#666] uppercase">MNHD SCORE:</span>
+                  <span className={`font-mono px-2 py-0.5 rounded border-[1.5px] border-black ${
+                    resultOverlay.accepted ? 'bg-[#CCFF00]' : 'bg-[#FF4081] text-white'
+                  }`}>
+                    {resultOverlay.score.toFixed(4)}
+                  </span>
                 </div>
-                <div className="w-full h-3.5 bg-[#E2E8F0] border-[1.5px] border-black rounded-full overflow-hidden">
+
+                {/* Gauge Meter */}
+                <div className="w-full h-3.5 bg-[#E2E8F0] border-[2px] border-black rounded-full overflow-hidden">
                   <div
-                    className={`h-full ${resultOverlay.accepted ? 'bg-[#CCFF00]' : 'bg-[#FF4081]'}`}
+                    className={`h-full transition-all duration-500 ${resultOverlay.accepted ? 'bg-[#CCFF00]' : 'bg-[#FF4081]'}`}
                     style={{ width: `${Math.max(10, Math.min(100, (1 - resultOverlay.score / 0.5) * 100))}%` }}
                   />
                 </div>
-                <div className="flex justify-between text-[10px] font-bold text-[#888] pt-0.5">
+
+                <div className="flex justify-between items-center text-[10px] font-mono font-bold text-[#666] pt-0.5">
                   <span>Threshold: &le; 0.3800</span>
-                  <span>Latency: {resultOverlay.time_ms}ms</span>
+                  <span>Latency: {resultOverlay.time_ms} ms</span>
                 </div>
+
+                {/* Sub-dermal CLAHE ROI thumbnail if available */}
+                {resultOverlay.clahe_base64 && (
+                  <div className="pt-2 border-t-[1.5px] border-black/10 flex items-center justify-between">
+                    <span className="text-[10px] font-black text-[#555] uppercase">EXTRACTED VEIN ROI:</span>
+                    <img 
+                      src={`data:image/png;base64,${resultOverlay.clahe_base64}`} 
+                      alt="Enhanced ROI" 
+                      className="w-9 h-9 rounded-lg border-[1.5px] border-black object-cover bg-black"
+                    />
+                  </div>
+                )}
               </div>
 
+              {/* Dismiss / Return to Idle Button */}
               <button
                 onClick={() => {
                   setResultOverlay(null);
                   setAppState('idle');
                 }}
-                className="w-full py-3 bg-[#FFDE59] border-[2.5px] border-black rounded-xl shadow-[3px_3px_0px_#121212] font-display font-black text-sm neo-btn"
+                className="w-full py-3.5 bg-[#FFDE59] border-[3px] border-black rounded-2xl shadow-[4px_4px_0px_#121212] font-display font-black text-sm neo-btn hover:bg-[#ffe26b]"
               >
-                DONE (RETURN TO IDLE)
+                RETURN TO IDLE (AUTO IN 4s)
               </button>
             </div>
           </div>
@@ -831,7 +973,7 @@ export default function App() {
         {/* ══════════════════════════════════════════════════════════════════════
             HIDDEN KIOSK ADMIN MODAL
             - Accessible only via 5 rapid taps on top-left camera indicator bead
-            - Kept completely separate from the end-user touch terminal interface
+            - Contains relocated technical specs badge (Priority 3)
             - Provides Reset Database & Accuracy Matrix diagnostics
            ══════════════════════════════════════════════════════════════════════ */}
         {adminOpen && (
@@ -852,30 +994,48 @@ export default function App() {
               </div>
 
               <div className="overflow-y-auto space-y-3 flex-1 pr-1">
-                {/* Stats Summary */}
-                <div className="p-3 bg-white border-[2px] border-black rounded-xl space-y-1">
+                {/* Relocated System & Technical Specs Card (Priority 3) */}
+                <div className="p-3 bg-white border-[2px] border-black rounded-xl space-y-1.5 shadow-[2px_2px_0px_#121212]">
+                  <div className="flex items-center gap-1.5 text-[#38BDF8] font-black pb-1 border-b border-black/10">
+                    <Cpu className="w-3.5 h-3.5" />
+                    <span className="uppercase text-[11px]">SYSTEM & SENSOR SPECS</span>
+                  </div>
+                  <div className="flex justify-between font-black">
+                    <span>OPTICAL BAND:</span>
+                    <span className="px-1.5 py-0.5 bg-[#FFDE59] border border-black rounded text-[9px]">NIR 850nm</span>
+                  </div>
                   <div className="flex justify-between font-black">
                     <span>CAMERA DRIVER:</span>
                     <span className="uppercase text-[#38BDF8]">{cameraType}</span>
                   </div>
                   <div className="flex justify-between font-black">
-                    <span>ENROLLED USERS:</span>
-                    <span>{totalUsers}</span>
+                    <span>CAMERA STATUS:</span>
+                    <span className={`px-1.5 py-0.5 rounded text-[9px] ${cameraReady ? 'bg-[#CCFF00]' : 'bg-[#FF4081] text-white'}`}>
+                      {cameraState.toUpperCase()}
+                    </span>
                   </div>
                   <div className="flex justify-between font-black">
-                    <span>THRESHOLD:</span>
-                    <span>MNHD &le; 0.3800</span>
+                    <span>ENROLLED USERS:</span>
+                    <span className="font-mono">{totalUsers} Active</span>
+                  </div>
+                  <div className="flex justify-between font-black">
+                    <span>MATCH THRESHOLD:</span>
+                    <span className="font-mono">MNHD &le; 0.3800</span>
+                  </div>
+                  <div className="flex justify-between font-black">
+                    <span>SEARCH ENGINE:</span>
+                    <span className="font-mono">2-Layer (RAM + 4 Cores)</span>
                   </div>
                 </div>
 
                 {/* Biometric Separation Matrix */}
-                <div className="p-3 bg-white border-[2px] border-black rounded-xl space-y-2">
+                <div className="p-3 bg-white border-[2px] border-black rounded-xl space-y-2 shadow-[2px_2px_0px_#121212]">
                   <div className="flex justify-between items-center">
                     <span className="font-display font-black text-xs uppercase">ACCURACY MATRIX</span>
                     <button 
                       onClick={fetchReport} 
                       disabled={reportLoading}
-                      className="px-2 py-0.5 bg-[#38BDF8] border-[1.5px] border-black rounded text-[10px] font-black"
+                      className="px-2 py-0.5 bg-[#38BDF8] border-[1.5px] border-black rounded text-[10px] font-black neo-btn"
                     >
                       {reportLoading ? 'Loading...' : 'Refresh'}
                     </button>
