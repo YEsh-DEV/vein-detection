@@ -52,9 +52,10 @@ from gabor import extract_veincode, match_templates, MATCH_THRESHOLD
 from contextlib import asynccontextmanager
 
 # Directories
-CAPTURE_DIR = "captures"
-ROI_DIR = "roi_clahe"
-STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CAPTURE_DIR = os.path.join(BASE_DIR, "captures")
+ROI_DIR = os.path.join(BASE_DIR, "roi_clahe")
+STATIC_DIR = os.path.join(BASE_DIR, "static")
 os.makedirs(CAPTURE_DIR, exist_ok=True)
 os.makedirs(ROI_DIR, exist_ok=True)
 
@@ -277,11 +278,19 @@ def process_image(gray: np.ndarray):
 def save_capture_to_disk(gray: np.ndarray, roi: np.ndarray, username: str, mode: str, idx: int = 0):
     """Save raw capture and CLAHE ROI to captures/ and roi_clahe/."""
     try:
+        os.makedirs(CAPTURE_DIR, exist_ok=True)
+        os.makedirs(ROI_DIR, exist_ok=True)
         ts = time.strftime("%Y%m%d_%H%M%S")
         cap_name = f"{username}_{mode}_{idx}_{ts}.png" if mode == "enroll" else f"{username}_{mode}_{ts}.png"
         roi_name = f"{username}_{mode}_{idx}_{ts}_clahe.png" if mode == "enroll" else f"{username}_{mode}_{ts}_clahe.png"
-        cv2.imwrite(os.path.join(CAPTURE_DIR, cap_name), gray)
-        cv2.imwrite(os.path.join(ROI_DIR, roi_name), roi)
+        cap_path = os.path.join(CAPTURE_DIR, cap_name)
+        roi_path = os.path.join(ROI_DIR, roi_name)
+        ok1 = cv2.imwrite(cap_path, gray)
+        ok2 = cv2.imwrite(roi_path, roi)
+        if ok1 and ok2:
+            print(f"[+] Saved biometric capture: {cap_path} & {roi_path}")
+        else:
+            print(f"[!] Warning: cv2.imwrite failed (cap={ok1}, roi={ok2}) for {cap_path}")
     except Exception as e:
         print(f"[!] Warning: Failed saving capture to disk: {e}")
 
