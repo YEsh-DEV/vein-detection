@@ -7,20 +7,28 @@ Replaces contour convexity defects with 21 anatomical joint landmarks.
 """
 
 import os
-import sys
 import cv2
 import numpy as np
 import urllib.request
 
-import mediapipe as mp
-from mediapipe.tasks.python import BaseOptions
-from mediapipe.tasks.python.vision import HandLandmarker, HandLandmarkerOptions, RunningMode
+try:
+    import mediapipe as mp
+    from mediapipe.tasks.python import BaseOptions
+    from mediapipe.tasks.python.vision import HandLandmarker, HandLandmarkerOptions, RunningMode
+    MEDIAPIPE_AVAILABLE = True
+except ImportError:
+    mp = None
+    MEDIAPIPE_AVAILABLE = False
 
-DEFAULT_MODEL_PATH = "hand_landmarker.task"
+try:
+    from app.constants import MODEL_PATH
+except ImportError:
+    from constants import MODEL_PATH
+
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
 
 
-def ensure_model_exists(model_path: str = DEFAULT_MODEL_PATH) -> str:
+def ensure_model_exists(model_path: str = MODEL_PATH) -> str:
     """Checks if MediaPipe model exists, downloading it automatically if missing."""
     if not os.path.exists(model_path):
         print(f"[*] MediaPipe model '{model_path}' not found. Downloading (~8MB)...")
@@ -37,8 +45,10 @@ def ensure_model_exists(model_path: str = DEFAULT_MODEL_PATH) -> str:
     return model_path
 
 
-def build_landmarker(model_path: str = DEFAULT_MODEL_PATH) -> HandLandmarker:
+def build_landmarker(model_path: str = MODEL_PATH) -> HandLandmarker:
     """Creates and returns a persistent HandLandmarker instance."""
+    if not MEDIAPIPE_AVAILABLE:
+        raise ImportError("MediaPipe package is not installed. Please install with: pip install mediapipe")
     ensure_model_exists(model_path)
     options = HandLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=model_path),
@@ -76,18 +86,33 @@ def detect_hand_landmarks(gray_img: np.ndarray, landmarker) -> list:
 
 def extract_valleys_from_landmarks(landmarks_px: list) -> tuple:
     """
-    Derives Pv1 (index-middle) and Pv2 (ring-little) from MCP knuckle landmarks.
-    Pv1 = midpoint(Landmark 5, Landmark 9)
-    Pv2 = midpoint(Landmark 13, Landmark 17)
+    Derives Pv1 and Pv2 knuckle anchors with chirality normalization.
+    Pv1 and Pv2 always form a vector oriented horizontally across the hand
+    so that fingers point upward (towards -y) and the palm points downward.
     """
     index_mcp  = np.array(landmarks_px[5],  dtype=float)
     middle_mcp = np.array(landmarks_px[9],  dtype=float)
     ring_mcp   = np.array(landmarks_px[13], dtype=float)
     pinky_mcp  = np.array(landmarks_px[17], dtype=float)
+    wrist      = np.array(landmarks_px[0],  dtype=float)
 
-    pv1 = tuple(((index_mcp + middle_mcp) / 2.0).astype(int))
-    pv2 = tuple(((ring_mcp  + pinky_mcp)  / 2.0).astype(int))
-    return pv1, pv2
+    pv_radial = (index_mcp + middle_mcp) / 2.0
+    pv_ulnar  = (ring_mcp  + pinky_mcp)  / 2.0
+
+    # Vector from wrist (L0) to middle MCP (L9) points upward along the hand
+    v_up = middle_mcp - wrist
+    # Perpendicular vector pointing across the hand to the anatomical right
+    v_across = np.array([-v_up[1], v_up[0]])
+
+    # Vector from radial to ulnar side
+    d_vec = pv_ulnar - pv_radial
+    if np.dot(d_vec, v_across) < 0:
+        # Left hand presentation: orient pv1 -> pv2 along v_across
+        pv1, pv2 = pv_ulnar, pv_radial
+    else:
+        pv1, pv2 = pv_radial, pv_ulnar
+
+    return tuple(pv1.astype(int)), tuple(pv2.astype(int))
 
 
 def segment_hand(gray_img: np.ndarray) -> np.ndarray:
@@ -119,11 +144,15 @@ def segment_hand(gray_img: np.ndarray) -> np.ndarray:
 
 
 def extract_ma2017_scaled_roi(gray_img: np.ndarray, pv1: tuple, pv2: tuple,
-                               binary_mask: np.ndarray, target_size: int = 256,
+                               binary_mask: np.ndarray = None, target_size: int = 256,
                                scale_factor: float = 1.5,
-                               offset_factor: float = 0.35) -> tuple:
+                               offset_factor: float = 0.35,
+                               landmarks_px: list = None) -> tuple:
     """
     Extracts canonical 256x256 pixel Region of Interest (ROI) based on Ma et al. (2017).
+    Uses skeletal wrist landmark (L0) to reliably determine palm direction without
+    relying on binary silhouette thresholding. Symmetrically pads boundary cuts to
+    guarantee strict 1:1 aspect ratio pre-resize.
     """
     dx = pv2[0] - pv1[0]
     dy = pv2[1] - pv1[1]
@@ -135,16 +164,24 @@ def extract_ma2017_scaled_roi(gray_img: np.ndarray, pv1: tuple, pv2: tuple,
 
     h, w = gray_img.shape
     M            = cv2.getRotationMatrix2D((mid_x, mid_y), angle_deg, 1.0)
-    rotated_gray = cv2.warpAffine(gray_img,    M, (w, h), flags=cv2.INTER_LINEAR)
-    rotated_bin  = cv2.warpAffine(binary_mask, M, (w, h), flags=cv2.INTER_NEAREST)
+    rotated_gray = cv2.warpAffine(gray_img, M, (w, h), flags=cv2.INTER_LINEAR)
 
     pt_mid_h = np.array([mid_x, mid_y, 1.0])
     rot_mid  = M.dot(pt_mid_h)
     mx_r, my_r = int(rot_mid[0]), int(rot_mid[1])
 
-    dist_map      = cv2.distanceTransform(rotated_bin, cv2.DIST_L2, 5)
-    _, _, _, max_loc = cv2.minMaxLoc(dist_map)
-    direction     = 1 if max_loc[1] > my_r else -1
+    # Determine palm direction
+    direction = 1
+    if landmarks_px and len(landmarks_px) > 0:
+        # Skeletal anchoring via Wrist (Landmark 0)
+        wrist = landmarks_px[0]
+        rot_wrist = M.dot(np.array([wrist[0], wrist[1], 1.0]))
+        direction = 1 if rot_wrist[1] > my_r else -1
+    elif binary_mask is not None:
+        rotated_bin = cv2.warpAffine(binary_mask, M, (w, h), flags=cv2.INTER_NEAREST)
+        dist_map = cv2.distanceTransform(rotated_bin, cv2.DIST_L2, 5)
+        _, _, _, max_loc = cv2.minMaxLoc(dist_map)
+        direction = 1 if max_loc[1] > my_r else -1
 
     L         = int(dist_pv * scale_factor)
     offset_d0 = int(dist_pv * offset_factor)
@@ -159,10 +196,25 @@ def extract_ma2017_scaled_roi(gray_img: np.ndarray, pv1: tuple, pv2: tuple,
         y2 = my_r - offset_d0
         y1 = y2 - L
 
-    x1, y1 = max(0, x1), max(0, y1)
-    x2, y2 = min(w, x2), min(h, y2)
+    # Symmetric / edge-safe padding to preserve strict L x L square aspect ratio
+    pad_left   = max(0, -x1)
+    pad_top    = max(0, -y1)
+    pad_right  = max(0, x2 - w)
+    pad_bottom = max(0, y2 - h)
 
-    roi_patch = rotated_gray[y1:y2, x1:x2]
+    if pad_left or pad_top or pad_right or pad_bottom:
+        padded_canvas = cv2.copyMakeBorder(
+            rotated_gray, pad_top, pad_bottom, pad_left, pad_right,
+            borderType=cv2.BORDER_REPLICATE
+        )
+        crop_y1 = y1 + pad_top
+        crop_y2 = y2 + pad_top
+        crop_x1 = x1 + pad_left
+        crop_x2 = x2 + pad_left
+        roi_patch = padded_canvas[crop_y1:crop_y2, crop_x1:crop_x2]
+    else:
+        roi_patch = rotated_gray[y1:y2, x1:x2]
+
     if roi_patch.size == 0 or roi_patch.shape[0] < 10 or roi_patch.shape[1] < 10:
         raise ValueError("Invalid ROI bounding box coordinates.")
 
