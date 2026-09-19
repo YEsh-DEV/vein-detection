@@ -9,9 +9,13 @@ No other module in this project imports sqlite3 or touches palm_vein.db.
 import os
 import zlib
 import sqlite3
+from typing import Optional
 import numpy as np
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "palm_vein.db")
+try:
+    from app.constants import DB_PATH
+except ImportError:
+    from constants import DB_PATH
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -52,11 +56,17 @@ CREATE INDEX IF NOT EXISTS idx_users_active   ON users(active, username);
 """
 
 
-def compute_signature(VR: np.ndarray) -> np.ndarray:
-    """Computes a compact 16-float signature from a 256x256 binary VR array."""
-    block_means = VR.reshape(8, 32, 8, 32).mean(axis=(1, 3))
-    sig = block_means.reshape(4, 2, 4, 2).mean(axis=(1, 3))
-    return sig.flatten().astype(np.float32)
+def compute_signature(VR: np.ndarray, VI: Optional[np.ndarray] = None) -> np.ndarray:
+    """
+    Computes a discriminative 64-float signature (8x8 block pooling)
+    from 256x256 binary VR and VI VeinCode arrays.
+    """
+    if VI is not None:
+        comb = (VR.astype(np.float32) + VI.astype(np.float32)) * 0.5
+    else:
+        comb = VR.astype(np.float32)
+    sig = comb.reshape(8, 32, 8, 32).mean(axis=(1, 3)).flatten().astype(np.float32)
+    return sig
 
 
 def init_db():
@@ -88,6 +98,13 @@ def enroll_user(username: str, veincode_list: list) -> int:
 
     with sqlite3.connect(DB_PATH) as conn:
         try:
+            # Hard-delete any soft-deleted user (and their templates) with this username
+            conn.execute(
+                "DELETE FROM templates WHERE user_id IN (SELECT id FROM users WHERE username = ? AND active = 0)",
+                (username,)
+            )
+            conn.execute("DELETE FROM users WHERE username = ? AND active = 0", (username,))
+
             cursor = conn.execute(
                 "INSERT INTO users (username) VALUES (?)", (username,)
             )
@@ -99,7 +116,7 @@ def enroll_user(username: str, veincode_list: list) -> int:
 
                 vr_blob   = zlib.compress(VR.tobytes())
                 vi_blob   = zlib.compress(VI.tobytes())
-                sig       = compute_signature(VR)
+                sig       = compute_signature(VR, VI)
                 sig_blob  = sig.tobytes()
                 vr_mean   = float(VR.mean())
                 vi_mean   = float(VI.mean())
@@ -138,7 +155,7 @@ def get_all_signatures() -> dict:
 
     if not rows:
         return {
-            'matrix':       np.zeros((0, 16), dtype=np.float32),
+            'matrix':       np.zeros((0, 64), dtype=np.float32),
             'template_ids': [],
             'user_ids':     [],
         }
@@ -148,9 +165,13 @@ def get_all_signatures() -> dict:
     sigs         = []
 
     for tid, uid, sig_blob in rows:
+        sig = np.frombuffer(sig_blob, dtype=np.float32)
+        # Handle legacy 16-float signatures gracefully if encountered
+        if sig.shape[0] != 64 and sig.shape[0] == 16:
+            sig = np.pad(sig, (0, 48), mode='edge')
         template_ids.append(tid)
         user_ids.append(uid)
-        sigs.append(np.frombuffer(sig_blob, dtype=np.float32))
+        sigs.append(sig)
 
     return {
         'matrix':       np.stack(sigs, axis=0),
@@ -159,45 +180,25 @@ def get_all_signatures() -> dict:
     }
 
 
-def get_all_templates() -> list:
-    """Returns all enrolled templates in the database."""
-    with sqlite3.connect(DB_PATH) as conn:
-        rows = conn.execute(
-            """
-            SELECT t.id, u.username, t.vr_blob, t.vi_blob
-            FROM   templates t
-            JOIN   users u ON u.id = t.user_id
-            WHERE  u.active = 1
-            """
-        ).fetchall()
-
-    results = []
-    for tid, uname, vr_blob, vi_blob in rows:
-        VR = np.frombuffer(zlib.decompress(vr_blob), dtype=np.uint8).reshape(256, 256)
-        VI = np.frombuffer(zlib.decompress(vi_blob), dtype=np.uint8).reshape(256, 256)
-        results.append({'id': tid, 'username': uname, 'template': {'VR': VR, 'VI': VI}})
-    return results
-
-
 def get_templates_by_ids(template_ids: list) -> list:
-    """Loads and decompresses full VeinCode templates for specified IDs."""
+    """Loads and decompresses full VeinCode templates for specified IDs, returning (tid, uid, template_dict) tuples."""
     if not template_ids:
         return []
 
     placeholders = ",".join("?" for _ in template_ids)
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(
-            f"SELECT id, vr_blob, vi_blob FROM templates WHERE id IN ({placeholders})",
+            f"SELECT id, user_id, vr_blob, vi_blob FROM templates WHERE id IN ({placeholders})",
             template_ids
         ).fetchall()
 
     row_map = {}
-    for tid, vr_blob, vi_blob in rows:
+    for tid, uid, vr_blob, vi_blob in rows:
         VR = np.frombuffer(zlib.decompress(vr_blob), dtype=np.uint8).reshape(256, 256)
         VI = np.frombuffer(zlib.decompress(vi_blob), dtype=np.uint8).reshape(256, 256)
-        row_map[tid] = {'VR': VR, 'VI': VI}
+        row_map[tid] = (uid, {'VR': VR, 'VI': VI})
 
-    return [row_map[tid] for tid in template_ids if tid in row_map]
+    return [(tid, row_map[tid][0], row_map[tid][1]) for tid in template_ids if tid in row_map]
 
 
 def get_username(user_id: int) -> str:
@@ -259,4 +260,23 @@ def delete_user(username: str):
         conn.execute(
             "UPDATE users SET active = 0 WHERE username = ?", (username,)
         )
+        conn.commit()
+
+
+def get_user_id(username: str):
+    """Returns user_id for a given username if active, else None."""
+    username = username.strip().lower()
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT id FROM users WHERE username = ? AND active = 1", (username,)
+        ).fetchone()
+    return row[0] if row else None
+
+
+def reset_all_tables():
+    """Clears all users, templates, and access logs."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM templates")
+        conn.execute("DELETE FROM access_log")
+        conn.execute("DELETE FROM users")
         conn.commit()
