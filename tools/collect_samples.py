@@ -33,7 +33,16 @@ import json
 import cv2
 import numpy as np
 
-DATASET_DIR = "dataset"
+from pathlib import Path
+_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+try:
+    from app.constants import DATASET_DIR
+except ImportError:
+    from constants import DATASET_DIR
+
 LOG_CSV = os.path.join(DATASET_DIR, "dataset_log.csv")
 os.makedirs(DATASET_DIR, exist_ok=True)
 
