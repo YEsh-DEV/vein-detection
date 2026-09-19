@@ -7,7 +7,6 @@
 [![Backend](https://img.shields.io/badge/Backend-FastAPI%20%2B%20Picamera2-009688.svg?logo=fastapi)](https://fastapi.tiangolo.com/)
 [![Frontend](https://img.shields.io/badge/Frontend-React%2018%20%2B%20TypeScript%20%2B%20Tailwind-61dafb.svg?logo=react)](https://react.dev/)
 [![Biometrics](https://img.shields.io/badge/Matching-Modified%20Normalized%20Hamming%20Distance-orange.svg)]()
-[![Documentation](https://img.shields.io/badge/Architecture-Deep--Dive%20Report-purple.svg)](SYSTEM_ARCHITECTURE_OVERVIEW.md)
 
 ---
 
@@ -20,9 +19,6 @@ Unlike surface fingerprints or 2D facial recognition, palm veins operate in the 
 2. **Sub-Surface Imaging:** Back-scattered infrared reflection reveals veins as dark branching vascular silhouettes beneath the skin.
 3. **Liveness Guarantee:** Biometric patterns cannot be replicated from surface residue, photograph prints, or silicone prosthetics.
 4. **Sub-Second Edge Execution:** 100% on-device pipeline execution on the Raspberry Pi 5 without cloud connectivity or GPU acceleration.
-
-> 📖 **Looking for full mathematical equations, Gabor wavelet formulation, and deep-dive architecture specs?**  
-> See the [**Complete Technical Architecture Report (`SYSTEM_ARCHITECTURE_OVERVIEW.md`)**](SYSTEM_ARCHITECTURE_OVERVIEW.md).
 
 ---
 
@@ -136,25 +132,24 @@ python3 collect_samples.py
 
 ```text
 vein-detection1/
-├── server.py                       # FastAPI application & camera locking server
-├── gabor.py                        # 2D Gabor wavelet filter bank & shift-tolerant MNHD
-├── mediapipe_img.py                # MediaPipe landmarking & Ma et al. (2017) ROI extraction
-├── search_engine.py                # Two-layer search engine (RAM Euclidean + parallel MNHD)
-├── db_manager.py                   # SQLite database manager with zlib compression
-├── cam_test.py                     # Direct OpenCV terminal testing tool
-├── collect_samples.py              # Raw dataset sample collection engine
-├── hand_landmarker.task            # MediaPipe hand landmark model (~8MB)
-├── requirements.txt                # Production Python dependencies
-├── README.md                       # Main deployment and usage documentation
-├── SYSTEM_ARCHITECTURE_OVERVIEW.md # Comprehensive engineering & architectural deep-dive
-├── static/                         # Production-built React frontend assets
-└── web/                            # React 18 + TypeScript + Tailwind source code
-    ├── src/
-    │   ├── App.tsx                 # Neobrutalism application shell (1,130 LOC)
-    │   ├── index.css               # Design tokens, polka dots, and mechanical button CSS
-    │   └── main.tsx                # React DOM mount point
-    ├── vite.config.ts              # Vite configuration (outputs directly to ../static/)
-    └── package.json                # Web build scripts and dependencies
+├── app/
+│   ├── server.py                       # FastAPI application & camera locking server
+│   ├── gabor.py                        # 2D Gabor wavelet filter bank & shift-tolerant MNHD
+│   ├── mediapipe_img.py                # MediaPipe landmarking & Ma et al. (2017) ROI extraction
+│   ├── search_engine.py                # Two-layer search engine (RAM Euclidean + parallel MNHD)
+│   ├── db_manager.py                   # SQLite database manager with zlib compression
+│   └── constants.py                    # Consolidated thresholds, hyperparameters & canonical paths
+├── tools/
+│   ├── cam_test.py                     # Direct camera terminal testing tool
+│   └── collect_samples.py              # Raw dataset sample collection engine
+├── models/
+│   └── hand_landmarker.task            # MediaPipe hand landmark model (~8MB)
+├── data/
+│   └── palm_vein.db                    # Encrypted/indexed SQLite biometric database
+├── requirements.txt                    # Production Python dependencies
+├── README.md                           # Main deployment and usage documentation
+├── static/                             # Production-built React frontend assets
+└── web/                                # React 18 + TypeScript + Tailwind source code
 ```
 
 ---
