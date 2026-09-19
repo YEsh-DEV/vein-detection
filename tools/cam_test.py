@@ -16,6 +16,10 @@ import sys
 import time
 import re
 from pathlib import Path
+
+# Ensure Qt uses XWayland fallback on Raspberry Pi OS Wayland desktops
+os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+
 import cv2
 import numpy as np
 
@@ -141,10 +145,27 @@ def get_preview_frame(cam, cam_type):
 def capture_still_gray(cam, cam_type, still_cfg=None, preview_cfg=None):
     """Captures a full-res still frame and converts to grayscale."""
     if cam_type == "picamera2":
-        cam.switch_mode_and_capture_array(still_cfg)
-        still = cam.capture_array("main")
-        cam.configure(preview_cfg)
-        cam.start()
+        try:
+            if still_cfg is not None:
+                still = cam.switch_mode_and_capture_array(still_cfg)
+                cam.stop()
+                cam.configure(preview_cfg)
+                cam.start()
+            else:
+                still = cam.capture_array("main")
+        except Exception as e:
+            # Safe recovery if sensor mode-switching clashes
+            try:
+                cam.stop()
+            except Exception:
+                pass
+            try:
+                cam.configure(preview_cfg)
+                cam.start()
+            except Exception:
+                pass
+            still = cam.capture_array("main")
+
         if len(still.shape) == 3:
             return cv2.cvtColor(still, cv2.COLOR_BGR2GRAY)
         return still

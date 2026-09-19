@@ -381,6 +381,7 @@ def generate_video_stream():
 
 
 @app.get("/video_feed")
+@app.get("/api/video_feed")
 def video_feed():
     return StreamingResponse(
         generate_video_stream(),
@@ -403,6 +404,7 @@ async def get_status():
 
 
 @app.post("/api/database/reset")
+@app.delete("/api/database/reset")
 async def reset_database():
     """Danger zone: completely wipes all database tables and clears enrollment cache."""
     try:
