@@ -6,20 +6,21 @@ gabor.py
 Based on Ma et al. (2017), IET Biometrics.
 """
 
-import sys
-import os
-import time
 import numpy as np
 import cv2
 from scipy.signal import fftconvolve
 from scipy.ndimage import gaussian_filter
 
-BLOCK_SIZE = 32
-ROI_SIZE = 256
-GABOR_KSIZE = 15
-ORIENTATIONS_DEG = [0, 30, 60, 90, 120, 150]
-MAX_DISPLACEMENT = 8
-MATCH_THRESHOLD = 0.3800
+try:
+    from app.constants import (
+        BLOCK_SIZE, ROI_SIZE, GABOR_KSIZE, ORIENTATIONS_DEG,
+        MAX_DISPLACEMENT, MATCH_THRESHOLD, ANGLE_BRACKET, ANGLE_EARLY_EXIT,
+    )
+except ImportError:
+    from constants import (
+        BLOCK_SIZE, ROI_SIZE, GABOR_KSIZE, ORIENTATIONS_DEG,
+        MAX_DISPLACEMENT, MATCH_THRESHOLD, ANGLE_BRACKET, ANGLE_EARLY_EXIT,
+    )
 
 
 def estimate_orientation(block: np.ndarray) -> float:
@@ -113,11 +114,12 @@ def extract_veincode(roi_input, ksize: int = GABOR_KSIZE, debug: bool = False) -
         roi = roi_input.copy()
 
     roi = roi.astype(np.float64)
+    if roi.max() <= 1.0 and roi.max() > 0:
+        roi = roi * 255.0
     if roi.shape != (ROI_SIZE, ROI_SIZE):
-        roi = cv2.resize(roi.astype(np.uint8), (ROI_SIZE, ROI_SIZE), interpolation=cv2.INTER_LINEAR).astype(np.float64)
+        roi = cv2.resize(roi.astype(np.uint8), (ROI_SIZE, ROI_SIZE), interpolation=cv2.INTER_CUBIC).astype(np.float64)
 
-    if roi.max() > 1.0:
-        roi = roi / 255.0
+    roi = roi / 255.0
 
     VR = np.zeros((ROI_SIZE, ROI_SIZE), dtype=np.uint8)
     VI = np.zeros((ROI_SIZE, ROI_SIZE), dtype=np.uint8)
@@ -192,10 +194,13 @@ def normalized_hamming_distance(template: dict, target: dict, s: int, t: int) ->
     return float((xor_R.sum() + xor_I.sum()) / denom)
 
 
-def match_templates(template: dict, target: dict, max_disp: int = MAX_DISPLACEMENT) -> float:
+def match_templates(template: dict, target: dict, max_disp: int = MAX_DISPLACEMENT,
+                    angles: tuple = ANGLE_BRACKET, early_exit: float = ANGLE_EARLY_EXIT) -> float:
     """
     Translates template over [-max_disp, max_disp] in X and Y
-    to find minimum Modified Normalized Hamming Distance (MNHD).
+    and evaluates a small angular rotation bracket to find the
+    minimum Modified Normalized Hamming Distance (MNHD).
+    Exits early if baseline 0-deg match is already <= early_exit.
     """
     best_dist = 1.0
     for s in range(-max_disp, max_disp + 1):
@@ -203,6 +208,26 @@ def match_templates(template: dict, target: dict, max_disp: int = MAX_DISPLACEME
             d = normalized_hamming_distance(template, target, s, t)
             if d < best_dist:
                 best_dist = d
+
+    # Filter out 0-deg from angles bracket since already evaluated above
+    eval_angles = [a for a in angles if a != 0]
+    if best_dist <= early_exit or not eval_angles:
+        return best_dist
+
+    H, W = target['VR'].shape
+    cx, cy = W // 2, H // 2
+    for ang in eval_angles:
+        M = cv2.getRotationMatrix2D((cx, cy), float(ang), 1.0)
+        VR_rot = cv2.warpAffine(target['VR'], M, (W, H), flags=cv2.INTER_NEAREST)
+        VI_rot = cv2.warpAffine(target['VI'], M, (W, H), flags=cv2.INTER_NEAREST)
+        w_target = {'VR': VR_rot, 'VI': VI_rot}
+        for s in range(-max_disp, max_disp + 1):
+            for t in range(-max_disp, max_disp + 1):
+                d = normalized_hamming_distance(template, w_target, s, t)
+                if d < best_dist:
+                    best_dist = d
+                    if best_dist <= early_exit:
+                        return best_dist
     return best_dist
 
 
