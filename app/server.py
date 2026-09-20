@@ -11,9 +11,11 @@ import os
 import sys
 import time
 import base64
+import json
 import threading
 import asyncio
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List
 from contextlib import asynccontextmanager
@@ -35,7 +37,8 @@ if _PROJECT_ROOT not in sys.path:
 
 try:
     from app.constants import (
-        STATIC_DIR, CAPTURE_DIR, ROI_DIR, MODEL_PATH,
+        PROJECT_ROOT, STATIC_DIR, CAPTURE_DIR, ROI_DIR, MODEL_PATH,
+        LOGS_DIR, SCAN_DIAGNOSTICS_LOG,
         MATCH_THRESHOLD, ENROLL_CONSISTENCY_THRESHOLD,
         ENROLL_SAMPLE_MIN, ENROLL_SAMPLE_MAX, ENROLLMENT_CACHE_TTL,
     )
@@ -53,7 +56,8 @@ try:
     from app.gabor import extract_veincode
 except ImportError:
     from constants import (
-        STATIC_DIR, CAPTURE_DIR, ROI_DIR, MODEL_PATH,
+        PROJECT_ROOT, STATIC_DIR, CAPTURE_DIR, ROI_DIR, MODEL_PATH,
+        LOGS_DIR, SCAN_DIAGNOSTICS_LOG,
         MATCH_THRESHOLD, ENROLL_CONSISTENCY_THRESHOLD,
         ENROLL_SAMPLE_MIN, ENROLL_SAMPLE_MAX, ENROLLMENT_CACHE_TTL,
     )
@@ -294,11 +298,13 @@ def capture_frame_gray() -> np.ndarray:
         raise ValueError("No live camera available. Please connect Raspberry Pi camera or webcam.")
 
 
-def process_image(gray: np.ndarray):
+def process_image_with_timing(gray: np.ndarray):
     """
-    Extract CLAHE ROI and Gabor VeinCode from a grayscale hand frame.
+    Extract CLAHE ROI and Gabor VeinCode from a grayscale hand frame while capturing
+    granular per-stage latency (landmark detection, ROI alignment/CLAHE, Gabor extraction).
     Raises ValueError if palm landmarks or valleys cannot be detected.
     """
+    t_land0 = time.time()
     stretched = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
     landmarks = detect_hand_landmarks(stretched, landmarker)
     if landmarks is None or len(landmarks) < 21:
@@ -307,7 +313,9 @@ def process_image(gray: np.ndarray):
     pv1, pv2 = extract_valleys_from_landmarks(landmarks)
     if pv1 is None or pv2 is None:
         raise ValueError("Cannot detect finger valley landmarks. Spread fingers slightly.")
+    t_landmark_ms = round((time.time() - t_land0) * 1000, 2)
 
+    t_roi0 = time.time()
     hand_mask = segment_hand(stretched)
     roi_256, _, _ = extract_ma2017_scaled_roi(
         stretched, pv1, pv2, hand_mask,
@@ -318,12 +326,64 @@ def process_image(gray: np.ndarray):
         raise ValueError("Failed to extract palm ROI bounding box.")
 
     clahe_roi = enhance_roi_vessels(roi_256)
+    t_roi_ms = round((time.time() - t_roi0) * 1000, 2)
+
+    t_gab0 = time.time()
     code = extract_veincode(clahe_roi)
+    t_gabor_ms = round((time.time() - t_gab0) * 1000, 2)
+
+    timing = {
+        'landmark_ms': t_landmark_ms,
+        'roi_ms': t_roi_ms,
+        'gabor_ms': t_gabor_ms,
+    }
+    return clahe_roi, code, timing
+
+
+def process_image(gray: np.ndarray):
+    """Backward-compatible wrapper returning (clahe_roi, code)."""
+    clahe_roi, code, _ = process_image_with_timing(gray)
     return clahe_roi, code
 
 
+def prune_scan_captures(max_count: int = 200, max_age_seconds: int = 48 * 3600):
+    """
+    Bounded data retention policy for temporary scan-time captures only.
+    CRITICAL SAFETY: Strictly inspects files containing '_scan_' in their filename.
+    NEVER touches or deletes any enrollment captures, templates, or database records.
+    Keeps at most max_count (200) most recent scan files and purges files older than 48 hours.
+    """
+    now = time.time()
+    for directory in (CAPTURE_DIR, ROI_DIR):
+        if not os.path.exists(directory):
+            continue
+        try:
+            scan_files = []
+            for fname in os.listdir(directory):
+                if "_scan_" in fname and fname.lower().endswith((".png", ".jpg")):
+                    fpath = os.path.join(directory, fname)
+                    if os.path.isfile(fpath):
+                        mtime = os.path.getmtime(fpath)
+                        scan_files.append((fpath, mtime))
+
+            # Sort descending by mtime (newest first)
+            scan_files.sort(key=lambda x: x[1], reverse=True)
+
+            # Prune files exceeding max_count or older than 48h
+            for idx, (fpath, mtime) in enumerate(scan_files):
+                is_expired = (now - mtime) > max_age_seconds
+                exceeds_count = (idx >= max_count)
+                if is_expired or exceeds_count:
+                    try:
+                        os.remove(fpath)
+                    except OSError:
+                        pass
+        except Exception as e:
+            print(f"[!] Warning: Scan capture pruning error in {directory}: {e}")
+
+
 def save_capture_to_disk(gray: np.ndarray, roi: np.ndarray, username: str, mode: str, idx: int = 0):
-    """Save raw capture and CLAHE ROI to captures/ and roi_clahe/."""
+    """Save raw capture and CLAHE ROI to captures/ and roi_clahe/, returning their paths."""
     try:
         os.makedirs(CAPTURE_DIR, exist_ok=True)
         os.makedirs(ROI_DIR, exist_ok=True)
@@ -338,8 +398,49 @@ def save_capture_to_disk(gray: np.ndarray, roi: np.ndarray, username: str, mode:
             print(f"[+] Saved biometric capture: {cap_path} & {roi_path}")
         else:
             print(f"[!] Warning: cv2.imwrite failed (cap={ok1}, roi={ok2}) for {cap_path}")
+
+        # Enforce bounded retention on scan captures
+        if mode == "scan":
+            prune_scan_captures(max_count=200, max_age_seconds=48 * 3600)
+
+        return cap_path, roi_path
     except Exception as e:
         print(f"[!] Warning: Failed saving capture to disk: {e}")
+        return None, None
+
+
+def log_scan_diagnostic(
+    cap_path: Optional[str],
+    roi_path: Optional[str],
+    search_diag: dict,
+    latency_breakdown: dict
+):
+    """
+    Appends a structured diagnostic JSON line to logs/scan_diagnostics.jsonl.
+    Separate from console/uvicorn log for programmatic parsing and offline analysis.
+    """
+    try:
+        os.makedirs(LOGS_DIR, exist_ok=True)
+        cap_rel = os.path.relpath(cap_path, PROJECT_ROOT) if cap_path else None
+        roi_rel = os.path.relpath(roi_path, PROJECT_ROOT) if roi_path else None
+
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "capture_file": cap_rel,
+            "roi_file": roi_rel,
+            "decision": "ACCEPTED" if search_diag.get("accepted") else "REJECTED",
+            "matched_user": search_diag.get("username"),
+            "score": search_diag.get("score"),
+            "threshold": search_diag.get("threshold", MATCH_THRESHOLD),
+            "ranked_candidates": search_diag.get("ranked_candidates", []),
+            "l1_filtered_out": search_diag.get("l1_filtered_out", []),
+            "latency_ms": latency_breakdown,
+        }
+
+        with open(SCAN_DIAGNOSTICS_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        print(f"[!] Warning: Failed writing to scan_diagnostics.jsonl: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -422,14 +523,16 @@ async def scan_palm():
         raise HTTPException(status_code=503, detail="Camera hardware not available.")
 
     t0 = time.time()
+    t_cap0 = time.time()
     try:
         gray = await run_in_threadpool(capture_frame_gray)
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
+    t_capture_ms = round((time.time() - t_cap0) * 1000, 2)
 
     try:
-        clahe_roi, code = await asyncio.wait_for(
-            run_in_threadpool(process_image, gray),
+        clahe_roi, code, proc_timing = await asyncio.wait_for(
+            run_in_threadpool(process_image_with_timing, gray),
             timeout=15.0
         )
     except asyncio.TimeoutError:
@@ -443,8 +546,8 @@ async def scan_palm():
         raise HTTPException(status_code=400, detail=f"Pipeline error: {e}")
 
     try:
-        username, score, user_id = await asyncio.wait_for(
-            run_in_threadpool(engine.identify, code),
+        search_diag = await asyncio.wait_for(
+            run_in_threadpool(engine.identify_with_diagnostics, code),
             timeout=15.0
         )
     except asyncio.TimeoutError:
@@ -452,12 +555,33 @@ async def scan_palm():
             status_code=504,
             detail="Matching timeout. Try again."
         )
-    elapsed = int((time.time() - t0) * 1000)
-    accepted = (username is not None)
+
+    t_total_ms = round((time.time() - t0) * 1000, 2)
+    username = search_diag["username"]
+    score = search_diag["score"]
+    user_id = search_diag["user_id"]
+    accepted = search_diag["accepted"]
 
     # Pass resolved winning user_id when accepted=True
     await run_in_threadpool(log_access, user_id=user_id if accepted else None, score=score, accepted=accepted)
-    await run_in_threadpool(save_capture_to_disk, gray, clahe_roi, username or "unknown", "scan")
+    cap_path, roi_path = await run_in_threadpool(save_capture_to_disk, gray, clahe_roi, username or "unknown", "scan")
+
+    # Stage Latency Breakdown (Capture, Landmark, ROI, Gabor, Layer 1, Layer 2)
+    latency_breakdown = {
+        "capture": t_capture_ms,
+        "landmark": proc_timing["landmark_ms"],
+        "roi": proc_timing["roi_ms"],
+        "gabor": proc_timing["gabor_ms"],
+        "l1": search_diag["t_l1_ms"],
+        "l2": search_diag["t_l2_ms"],
+        "total": t_total_ms,
+    }
+
+    # Structured per-scan diagnostic logging
+    await run_in_threadpool(
+        log_scan_diagnostic,
+        cap_path, roi_path, search_diag, latency_breakdown
+    )
 
     # Encode CLAHE ROI as base64 thumbnail
     _, buf = cv2.imencode(".png", clahe_roi)
@@ -468,7 +592,7 @@ async def scan_palm():
         "username": username,
         "score": float(score),
         "threshold": float(MATCH_THRESHOLD),
-        "time_ms": elapsed,
+        "time_ms": int(t_total_ms),
         "clahe_base64": b64_roi,
     }
 

@@ -72,66 +72,145 @@ class SearchEngine:
         Identify a probe VeinCode against enrolled biometric database.
         Returns (username, best_score, best_user_id) if verified, else (None, best_score, None).
         """
-        if self._sig_matrix is None or self._sig_matrix.shape[0] == 0:
-            return None, 1.0, None
+        diag = self.identify_with_diagnostics(probe_veincode)
+        return diag['username'], diag['score'], diag['user_id']
 
-        return self._run_search(probe_veincode)
+    def identify_with_diagnostics(self, probe_veincode: dict) -> dict:
+        """
+        Runs two-layer biometric identification and returns comprehensive diagnostic telemetry:
+        - winner username, user_id, best_score, accepted decision
+        - full ranked list of ALL enrolled users with both L1 signature distance and L2 MNHD score
+        - list of templates/users filtered by Layer 1
+        - per-stage latency (L1 and L2 matching in ms)
+        """
+        empty_res = {
+            'username': None,
+            'score': 1.0,
+            'user_id': None,
+            'accepted': False,
+            'threshold': MATCH_THRESHOLD,
+            'ranked_candidates': [],
+            'l1_filtered_out': [],
+            't_l1_ms': 0.0,
+            't_l2_ms': 0.0,
+        }
 
-    def _run_search(self, probe_veincode: dict):
+        if self._sig_matrix is None or len(self._template_ids) == 0:
+            return empty_res
+
         n_templates = len(self._template_ids)
-        if n_templates == 0:
-            return None, 1.0, None
 
+        # ── Layer 1: Vectorized Signature Pre-Filter ──
+        t_l1_start = time.time()
+        probe_sig = compute_signature(probe_veincode['VR'], probe_veincode.get('VI'))
+        l1_dists = np.linalg.norm(self._sig_matrix - probe_sig, axis=1)
+        t_l1_ms = round((time.time() - t_l1_start) * 1000, 2)
+
+        # Track L1 distances and filtered templates
+        l1_filtered_out = []
+        for idx, (tid, uid) in enumerate(zip(self._template_ids, self._user_ids)):
+            dist = float(l1_dists[idx])
+            if dist >= self.L1_THRESHOLD:
+                try:
+                    uname = get_username(uid)
+                except KeyError:
+                    uname = f"user_{uid}"
+                l1_filtered_out.append({
+                    'template_id': tid,
+                    'user_id': uid,
+                    'username': uname,
+                    'l1_dist': round(dist, 4),
+                    'l1_threshold': self.L1_THRESHOLD,
+                })
+
+        # Determine candidates for Layer 2
         if n_templates <= self.L1_BYPASS_MAX:
-            # Small edge database: pass all enrolled templates to parallel Layer 2 without risk of premature filtering
-            candidate_template_ids = self._template_ids
+            # Edge database bypass: evaluate all templates in Layer 2
+            candidate_indices = list(range(n_templates))
         else:
-            probe_sig = compute_signature(probe_veincode['VR'], probe_veincode.get('VI'))
-            dists     = np.linalg.norm(self._sig_matrix - probe_sig, axis=1)
-
-            sorted_idx = np.argsort(dists)
-            candidates = [i for i in sorted_idx if dists[i] < self.L1_THRESHOLD]
+            sorted_idx = np.argsort(l1_dists)
+            candidates = [i for i in sorted_idx if l1_dists[i] < self.L1_THRESHOLD]
             candidates = candidates[:self.TOP_K]
-
             if len(candidates) == 0:
                 candidates = sorted_idx[:min(10, len(sorted_idx))].tolist()
+            candidate_indices = candidates
 
-            candidate_template_ids = [self._template_ids[i] for i in candidates]
+        candidate_template_ids = [self._template_ids[i] for i in candidate_indices]
 
-        # get_templates_by_ids returns synchronized [(tid, uid, template_dict), ...]
+        # ── Layer 2: Multiprocessing Parallel MNHD ──
+        t_l2_start = time.time()
         records = get_templates_by_ids(candidate_template_ids)
         if not records:
-            return None, 1.0, None
+            return empty_res
 
         match_user_ids = [r[1] for r in records]
         templates      = [r[2] for r in records]
 
-        args   = [(t, probe_veincode) for t in templates]
+        args = [(t, probe_veincode) for t in templates]
         scores = self._pool.map(_match_worker, args)
+        t_l2_ms = round((time.time() - t_l2_start) * 1000, 2)
 
-        user_best = self._aggregate_per_user(match_user_ids, scores)
-        if not user_best:
-            return None, 1.0, None
+        # Aggregate L2 scores and L1 distances per user
+        user_best_l2 = {}
+        for uid, score in zip(match_user_ids, scores):
+            if uid not in user_best_l2 or score < user_best_l2[uid]:
+                user_best_l2[uid] = float(score)
 
-        best_user_id = min(user_best, key=user_best.get)
-        best_score   = user_best[best_user_id]
+        user_min_l1 = {}
+        for idx, uid in enumerate(self._user_ids):
+            dist = float(l1_dists[idx])
+            if uid not in user_min_l1 or dist < user_min_l1[uid]:
+                user_min_l1[uid] = dist
 
-        if best_score <= MATCH_THRESHOLD:
-            username = get_username(best_user_id)
-            return username, best_score, best_user_id
+        # Build full ranked candidates list
+        all_unique_uids = list(dict.fromkeys(self._user_ids))
+        ranked_candidates = []
+        for uid in all_unique_uids:
+            try:
+                uname = get_username(uid)
+            except KeyError:
+                uname = f"user_{uid}"
 
-        return None, best_score, None
+            best_l2 = user_best_l2.get(uid, 1.0)
+            min_l1 = user_min_l1.get(uid, 1.0)
+            passed_l1 = (min_l1 < self.L1_THRESHOLD)
 
-    def _aggregate_per_user(self, user_ids: list, scores: list) -> dict:
-        """
-        Best-match aggregation: identity is confirmed if ANY enrolled pose matches.
-        Eliminates penalty on diverse multi-pose enrollments.
-        """
-        user_best = {}
-        for uid, score in zip(user_ids, scores):
-            if uid not in user_best or score < user_best[uid]:
-                user_best[uid] = score
-        return user_best
+            ranked_candidates.append({
+                'username': uname,
+                'user_id': uid,
+                'score': round(best_l2, 4),
+                'l1_dist': round(min_l1, 4),
+                'passed_l1': passed_l1,
+            })
+
+        # Rank by best L2 score ascending
+        ranked_candidates.sort(key=lambda x: x['score'])
+
+        if not user_best_l2:
+            return empty_res
+
+        best_user_id = min(user_best_l2, key=user_best_l2.get)
+        best_score   = user_best_l2[best_user_id]
+        accepted     = (best_score <= MATCH_THRESHOLD)
+
+        winner_username = None
+        if accepted:
+            try:
+                winner_username = get_username(best_user_id)
+            except KeyError:
+                winner_username = None
+
+        return {
+            'username': winner_username,
+            'score': round(float(best_score), 4),
+            'user_id': best_user_id if accepted else None,
+            'accepted': accepted,
+            'threshold': MATCH_THRESHOLD,
+            'ranked_candidates': ranked_candidates,
+            'l1_filtered_out': l1_filtered_out,
+            't_l1_ms': t_l1_ms,
+            't_l2_ms': t_l2_ms,
+        }
 
     def close(self):
         """Terminates the multiprocessing pool."""

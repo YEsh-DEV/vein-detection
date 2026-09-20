@@ -25,12 +25,15 @@ STATIC_DIR = os.path.join(PROJECT_ROOT, "static")
 CAPTURE_DIR = os.path.join(PROJECT_ROOT, "captures")
 ROI_DIR = os.path.join(PROJECT_ROOT, "roi_clahe")
 DATASET_DIR = os.path.join(PROJECT_ROOT, "dataset")
+LOGS_DIR = os.path.join(PROJECT_ROOT, "logs")
+SCAN_DIAGNOSTICS_LOG = os.path.join(LOGS_DIR, "scan_diagnostics.jsonl")
 
 # Ensure runtime directories exist
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(MODELS_DIR, exist_ok=True)
 os.makedirs(CAPTURE_DIR, exist_ok=True)
 os.makedirs(ROI_DIR, exist_ok=True)
+os.makedirs(LOGS_DIR, exist_ok=True)
 
 
 # ---------------------------------------------------------------------------

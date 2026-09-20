@@ -24,6 +24,8 @@ database/
 *.db
 *.db-shm
 *.db-wal
+logs/*.jsonl
+!logs/.gitkeep
 
 # ── MediaPipe model (large binary — download separately) ──────────────────────
 hand_landmarker.task
