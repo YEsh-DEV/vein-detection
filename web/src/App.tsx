@@ -246,6 +246,33 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
+  // Stale Timer Guards & Inactivity Management
+  const resultAutoReturnTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastResultDismissedRef = useRef<number>(0);
+
+  const clearResultAutoReturn = () => {
+    if (resultAutoReturnTimerRef.current) {
+      clearTimeout(resultAutoReturnTimerRef.current);
+      resultAutoReturnTimerRef.current = null;
+    }
+  };
+
+  const closeResultOverlay = (target: 'scan' | 'idle' = 'scan') => {
+    clearResultAutoReturn();
+    setResultOverlay(null);
+    lastResultDismissedRef.current = Date.now();
+    if (target === 'idle') {
+      setAppState('idle');
+    }
+  };
+
+  // Ensure timers are cleared whenever appState unmounts or changes
+  useEffect(() => {
+    return () => {
+      clearResultAutoReturn();
+    };
+  }, [appState]);
+
   // Cancel enrollment when leaving enroll state with partial samples
   useEffect(() => {
     if (appState !== 'enroll' && enrollSamples.length > 0 && enrollUsername) {
@@ -261,20 +288,55 @@ export default function App() {
   }, [appState]);
 
   // Idle Timeout: if Scan screen has no interaction for 30s, auto-return to Idle
+  // Includes ~1.5s grace period after result dismissal and resets on any user interaction
   useEffect(() => {
     if (appState !== 'scan') return;
     if (isScanning || scanCountdown !== null || resultOverlay !== null) return;
 
-    const timeout = setTimeout(() => {
-      setAppState('idle');
-    }, 30000);
+    let idleTimeout: ReturnType<typeof setTimeout> | null = null;
+    let graceTimeout: ReturnType<typeof setTimeout> | null = null;
 
-    return () => clearTimeout(timeout);
+    const startIdleCountdown = () => {
+      if (idleTimeout) clearTimeout(idleTimeout);
+      idleTimeout = setTimeout(() => {
+        if (appStateRef.current === 'scan') {
+          setAppState('idle');
+        }
+      }, 30000);
+    };
+
+    const elapsedSinceDismiss = Date.now() - lastResultDismissedRef.current;
+    const graceDelay = Math.max(0, 1500 - elapsedSinceDismiss);
+
+    if (graceDelay > 0) {
+      graceTimeout = setTimeout(() => {
+        startIdleCountdown();
+      }, graceDelay);
+    } else {
+      startIdleCountdown();
+    }
+
+    const resetOnUserActivity = () => {
+      startIdleCountdown();
+    };
+
+    window.addEventListener('touchstart', resetOnUserActivity, { passive: true });
+    window.addEventListener('mousedown', resetOnUserActivity, { passive: true });
+    window.addEventListener('keydown', resetOnUserActivity, { passive: true });
+
+    return () => {
+      if (graceTimeout) clearTimeout(graceTimeout);
+      if (idleTimeout) clearTimeout(idleTimeout);
+      window.removeEventListener('touchstart', resetOnUserActivity);
+      window.removeEventListener('mousedown', resetOnUserActivity);
+      window.removeEventListener('keydown', resetOnUserActivity);
+    };
   }, [appState, isScanning, scanCountdown, resultOverlay]);
 
   // Scan Execution with 3-Second Countdown
   const handleScanWithCountdown = async () => {
     if (isScanning || scanCountdown !== null || !cameraReady) return;
+    clearResultAutoReturn();
     
     // 3-Second countdown with state abort check
     for (let i = 3; i > 0; i--) {
@@ -308,17 +370,18 @@ export default function App() {
           });
         }
 
-        // Auto-return to Idle state after 4.5 seconds
-        setTimeout(() => {
-          setResultOverlay(null);
-          setAppState('idle');
+        // Auto-return to Idle state after 4.5s only if user does not dismiss or tap Scan Again
+        clearResultAutoReturn();
+        resultAutoReturnTimerRef.current = setTimeout(() => {
+          closeResultOverlay('idle');
         }, 4500);
 
       } else {
         const err = await res.json();
         showToast(err.detail || 'Scan failed: Palm not detected', 'warn');
-        setTimeout(() => {
-          setAppState('idle');
+        clearResultAutoReturn();
+        resultAutoReturnTimerRef.current = setTimeout(() => {
+          closeResultOverlay('idle');
         }, 4000);
       }
     } catch {
@@ -956,16 +1019,26 @@ export default function App() {
                 )}
               </div>
 
-              {/* Dismiss / Return to Idle Button */}
-              <button
-                onClick={() => {
-                  setResultOverlay(null);
-                  setAppState('idle');
-                }}
-                className="w-full py-3.5 bg-[#FFDE59] border-[3px] border-black rounded-2xl shadow-[4px_4px_0px_#121212] font-display font-black text-sm neo-btn hover:bg-[#ffe26b]"
-              >
-                RETURN TO IDLE (AUTO IN 4s)
-              </button>
+              {/* Action Buttons: SCAN AGAIN (stays in scan screen) & RETURN TO IDLE */}
+              <div className="grid grid-cols-2 gap-3 pt-1">
+                <button
+                  id="scan-again-btn"
+                  onClick={() => closeResultOverlay('scan')}
+                  className="py-3.5 bg-[#CCFF00] text-black border-[3px] border-black rounded-2xl shadow-[4px_4px_0px_#121212] font-display font-black text-sm neo-btn hover:bg-[#b8e600] flex items-center justify-center gap-2"
+                >
+                  <RefreshCw className="w-4 h-4 stroke-[2.5]" />
+                  <span>SCAN AGAIN</span>
+                </button>
+
+                <button
+                  id="return-idle-btn"
+                  onClick={() => closeResultOverlay('idle')}
+                  className="py-3.5 bg-[#FFDE59] text-black border-[3px] border-black rounded-2xl shadow-[4px_4px_0px_#121212] font-display font-black text-sm neo-btn hover:bg-[#ffe26b] flex items-center justify-center gap-2"
+                >
+                  <ArrowLeft className="w-4 h-4 stroke-[2.5]" />
+                  <span>IDLE (4s)</span>
+                </button>
+              </div>
             </div>
           </div>
         )}
