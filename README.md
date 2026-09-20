@@ -141,15 +141,18 @@ vein-detection1/
 │   └── constants.py                    # Consolidated thresholds, hyperparameters & canonical paths
 ├── tools/
 │   ├── cam_test.py                     # Direct camera terminal testing tool
-│   └── collect_samples.py              # Raw dataset sample collection engine
+│   ├── collect_samples.py              # Raw dataset sample collection engine
+│   └── real_data_analysis.py           # Offline real biometric mining & threshold sweep audit
 ├── models/
 │   └── hand_landmarker.task            # MediaPipe hand landmark model (~8MB)
 ├── data/
 │   └── palm_vein.db                    # Encrypted/indexed SQLite biometric database
+├── logs/
+│   └── scan_diagnostics.jsonl          # Structured per-scan latency & candidate score logs
 ├── requirements.txt                    # Production Python dependencies
 ├── README.md                           # Main deployment and usage documentation
-├── static/                             # Production-built React frontend assets
 └── web/                                # React 18 + TypeScript + Tailwind source code
+    └── static/                         # Production-built React frontend assets served by FastAPI
 ```
 
 ---

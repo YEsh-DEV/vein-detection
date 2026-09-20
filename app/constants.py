@@ -21,7 +21,7 @@ DB_PATH = os.path.join(DATA_DIR, "palm_vein.db")
 MODELS_DIR = os.path.join(PROJECT_ROOT, "models")
 MODEL_PATH = os.path.join(MODELS_DIR, "hand_landmarker.task")
 
-STATIC_DIR = os.path.join(PROJECT_ROOT, "static")
+STATIC_DIR = os.path.join(PROJECT_ROOT, "web", "static")
 CAPTURE_DIR = os.path.join(PROJECT_ROOT, "captures")
 ROI_DIR = os.path.join(PROJECT_ROOT, "roi_clahe")
 DATASET_DIR = os.path.join(PROJECT_ROOT, "dataset")
