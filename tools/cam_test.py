@@ -19,8 +19,13 @@ from pathlib import Path
 
 # Ensure Qt uses XWayland fallback on Raspberry Pi OS Wayland desktops
 os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
 
 import cv2
+try:
+    cv2.setLogLevel(0)
+except Exception:
+    pass
 import numpy as np
 
 # Ensure project root is in sys.path
@@ -101,7 +106,8 @@ POSITION_HINTS = [
 
 
 def init_camera():
-    """Initialises Picamera2 or OpenCV fallback."""
+    """Initialises Picamera2 or OpenCV fallback across multi-index devices."""
+    picam2_err = None
     try:
         from picamera2 import Picamera2
         p = Picamera2()
@@ -113,19 +119,33 @@ def init_camera():
         )
         p.configure(preview_cfg)
         p.start()
-        print("[+] Picamera2 camera initialised.")
+        print("[+] Picamera2 camera initialised successfully.")
         return p, "picamera2", preview_cfg, still_cfg
     except Exception as e:
-        print(f"[-] Picamera2 unavailable ({e}). Trying OpenCV...")
+        picam2_err = str(e)
+        print(f"[-] Picamera2 unavailable ({e}). Scanning OpenCV V4L2 device nodes...")
 
-    cap = cv2.VideoCapture(0)
-    if cap.isOpened():
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        print("[+] OpenCV VideoCapture(0) initialised.")
-        return cap, "opencv", None, None
+    # Multi-index probe for USB webcams (/dev/video0 through /dev/video7)
+    for idx in range(8):
+        try:
+            cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
+            if not cap.isOpened():
+                cap = cv2.VideoCapture(idx)
 
-    print("[!] No camera found.")
+            if cap.isOpened():
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                ret, frame = cap.read()
+                if ret and frame is not None and frame.size > 0:
+                    print(f"[+] OpenCV VideoCapture camera initialised successfully on /dev/video{idx}.")
+                    return cap, "opencv", None, None
+                cap.release()
+        except Exception as e:
+            pass
+
+    print("[!] No working camera found.")
+    print(f"    - Picamera2 status : {picam2_err or 'Not detected'}")
+    print(f"    - OpenCV V4L2 (0-7): No readable video nodes")
     return None, None, None, None
 
 
@@ -431,10 +451,128 @@ def scan_flow(cam, cam_type, landmarker, engine, preview_cfg, still_cfg):
     log_access(user_id=user_id if username else None, score=score, accepted=(username is not None))
 
 
+def live_view_flow(cam, cam_type, landmarker=None):
+    """Continuous live camera stream showing raw feed, ROI guide, and hand landmarks."""
+    print("\n--- Live Camera Stream ---")
+    print("Press 'q' in the window or Ctrl+C in terminal to exit preview.\n")
+
+    # Check if GUI display is available
+    has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    if not has_display:
+        print("[!] No graphical DISPLAY detected (headless/SSH session).")
+        print("    Testing frame capture and saving a test image to 'cam_snapshot.jpg'...")
+        frame = get_preview_frame(cam, cam_type)
+        if frame is not None and frame.size > 0:
+            h, w = frame.shape[:2]
+            mean_brightness = float(np.mean(frame))
+            cv2.imwrite("cam_snapshot.jpg", frame)
+            print(f"[+] Camera frame captured successfully: {w}x{h}, mean brightness: {mean_brightness:.1f}/255")
+            print("[+] Saved test snapshot to 'cam_snapshot.jpg'. You can inspect this image file.")
+        else:
+            print("[-] Failed to capture preview frame from camera.")
+        return
+
+    win_name = "Palm Vein Camera Stream (Press Q to exit)"
+    try:
+        cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(win_name, 640, 480)
+    except cv2.error as e:
+        print(f"[!] GUI display unavailable ({e}). Falling back to snapshot test...")
+        frame = get_preview_frame(cam, cam_type)
+        if frame is not None and frame.size > 0:
+            h, w = frame.shape[:2]
+            mean_brightness = float(np.mean(frame))
+            cv2.imwrite("cam_snapshot.jpg", frame)
+            print(f"[+] Camera frame captured: {w}x{h}, mean brightness: {mean_brightness:.1f}/255")
+            print("[+] Saved test snapshot to 'cam_snapshot.jpg'.")
+        return
+
+    fps_count = 0
+    fps_start = time.time()
+    current_fps = 0.0
+
+    try:
+        while True:
+            frame = get_preview_frame(cam, cam_type)
+            if frame is None:
+                print("[-] Dropped frame from camera.")
+                time.sleep(0.05)
+                continue
+
+            fps_count += 1
+            if time.time() - fps_start >= 1.0:
+                current_fps = fps_count / (time.time() - fps_start)
+                fps_count = 0
+                fps_start = time.time()
+
+            display_frame = frame.copy()
+
+            # If landmarker is present, try detecting hand in preview
+            hand_detected = False
+            if landmarker is not None:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
+                norm_gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
+                landmarks = detect_hand_landmarks(norm_gray, landmarker)
+                if landmarks is not None and len(landmarks) >= 21:
+                    hand_detected = True
+                    for pt in landmarks:
+                        cv2.circle(display_frame, (int(pt[0]), int(pt[1])), 4, (0, 255, 0), -1)
+
+            # Draw guide overlay
+            box_color = (0, 255, 0) if hand_detected else (0, 165, 255)
+            cv2.rectangle(display_frame, (BOX_X1, BOX_Y1), (BOX_X2, BOX_Y2), box_color, 2)
+            status_text = "Hand Detected!" if hand_detected else "Position Palm Inside Box"
+            cv2.putText(display_frame, status_text, (BOX_X1, BOX_Y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, box_color, 2)
+            cv2.putText(display_frame, f"FPS: {current_fps:.1f} | Cam: {cam_type}", (15, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            cv2.putText(display_frame, "Press 'Q' to Exit Preview", (15, 460),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+
+            cv2.imshow(win_name, display_frame)
+            key = cv2.waitKey(1) & 0xFF
+            if key in (ord('q'), ord('Q'), 27):
+                break
+    except KeyboardInterrupt:
+        pass
+    finally:
+        cv2.destroyWindow(win_name)
+
+
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Palm Vein Camera Test Utility")
+    parser.add_argument("--view", "--stream", action="store_true", help="Launch live camera stream immediately")
+    args = parser.parse_args()
+
     print("\n" + "=" * 50)
-    print("  PALM VEIN AUTH — Pi 5 Terminal Test")
+    print("  PALM VEIN AUTH — Pi 5 Camera Diagnostic & Test")
     print("=" * 50)
+
+    print("Initialising camera...")
+    cam, cam_type, preview_cfg, still_cfg = init_camera()
+    if cam is None:
+        print("\n" + "!" * 50)
+        print("  [!] CAMERA HARDWARE NOT DETECTED")
+        print("!" * 50)
+        print("Please run our automated hardware diagnostic tool:")
+        print("    python3 tools/check_camera.py\n")
+        print("Common reasons on Raspberry Pi 5:")
+        print(" 1. Python venv missing system bindings: recreate venv with --system-site-packages")
+        print(" 2. Ribbon cable loose or inverted on Pi 5 CAM0/CAM1 port")
+        print(" 3. Third-party / OV5647 camera requires dtoverlay in /boot/firmware/config.txt")
+        print(" 4. USB webcam plugged into alternate port")
+        print("=" * 50 + "\n")
+        return
+
+    if args.view:
+        print("Loading MediaPipe hand landmarker for stream...")
+        try:
+            landmarker = build_landmarker(MODEL_PATH)
+        except Exception:
+            landmarker = None
+        live_view_flow(cam, cam_type, landmarker)
+        return
 
     print("Initialising database...")
     init_db()
@@ -448,13 +586,8 @@ def main():
         print(f"[!] Landmarker warning/error: {e}")
         landmarker = None
 
-    print("Initialising camera...")
-    cam, cam_type, preview_cfg, still_cfg = init_camera()
-    if cam is None:
-        print("[!] No camera. Exiting.")
-        return
-
     print("\nReady. Commands:")
+    print("  V = View live camera feed (test camera & hand tracking)")
     print("  N = Enroll new user")
     print("  S = Scan / identify palm")
     print("  L = List enrolled users")
@@ -462,8 +595,10 @@ def main():
 
     try:
         while True:
-            cmd = input("Command [N/S/L/Q]: ").strip().upper()
-            if cmd == 'N':
+            cmd = input("Command [V/N/S/L/Q]: ").strip().upper()
+            if cmd == 'V':
+                live_view_flow(cam, cam_type, landmarker)
+            elif cmd == 'N':
                 enroll_flow(cam, cam_type, landmarker, engine, preview_cfg, still_cfg)
             elif cmd == 'S':
                 scan_flow(cam, cam_type, landmarker, engine, preview_cfg, still_cfg)
@@ -477,7 +612,7 @@ def main():
                 print("Exiting.")
                 break
             else:
-                print("Unknown command. Use N, S, L, or Q.")
+                print("Unknown command. Use V, N, S, L, or Q.")
     finally:
         cv2.destroyAllWindows()
         if cam_type == "picamera2" and cam is not None:
@@ -488,7 +623,8 @@ def main():
                 pass
         elif cam_type == "opencv" and cam is not None:
             cam.release()
-        engine.close()
+        if 'engine' in locals():
+            engine.close()
 
 
 if __name__ == "__main__":

@@ -20,7 +20,13 @@ from pathlib import Path
 from typing import Optional, List
 from contextlib import asynccontextmanager
 
+os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
+
 import cv2
+try:
+    cv2.setLogLevel(0)
+except Exception:
+    pass
 import numpy as np
 import mimetypes
 
@@ -91,6 +97,8 @@ picam2 = None
 cv_cap = None
 CAMERA_AVAILABLE = False
 CAMERA_TYPE = None
+CAMERA_DEVICE = None
+CAMERA_ERROR_DETAIL = ""
 preview_cfg = None
 still_cfg = None
 
@@ -100,8 +108,9 @@ still_cfg = None
 # ---------------------------------------------------------------------------
 def init_hardware_camera():
     """Attempts to initialize Raspberry Pi Camera via Picamera2 or USB Webcam via OpenCV."""
-    global picam2, cv_cap, CAMERA_AVAILABLE, CAMERA_TYPE, preview_cfg, still_cfg
+    global picam2, cv_cap, CAMERA_AVAILABLE, CAMERA_TYPE, CAMERA_DEVICE, CAMERA_ERROR_DETAIL, preview_cfg, still_cfg
 
+    picam2_err = None
     # Attempt 1: Picamera2 (Raspberry Pi native CSI camera / NoIR)
     try:
         from picamera2 import Picamera2
@@ -111,31 +120,44 @@ def init_hardware_camera():
         picam2 = p
         CAMERA_AVAILABLE = True
         CAMERA_TYPE = "picamera2"
+        CAMERA_DEVICE = "CSI"
+        CAMERA_ERROR_DETAIL = ""
         print("[+] Picamera2 camera hardware initialized successfully.")
         return
     except Exception as e:
-        print(f"[-] Picamera2 unavailable ({e}). Falling back to OpenCV webcam...")
+        picam2_err = str(e)
+        print(f"[-] Picamera2 unavailable ({e}). Probing OpenCV V4L2 device nodes...")
 
-    # Attempt 2: OpenCV USB Webcam (V4L2 device index 0)
-    try:
-        cap = cv2.VideoCapture(0)
-        if cap.isOpened():
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            cap.set(cv2.CAP_PROP_FPS, 30)
-            cv_cap = cap
-            CAMERA_AVAILABLE = True
-            CAMERA_TYPE = "opencv"
-            print("[+] OpenCV VideoCapture camera initialized successfully.")
-            return
-        else:
-            print("[-] OpenCV VideoCapture(0) failed to open.")
-    except Exception as e:
-        print(f"[-] OpenCV camera probe error: {e}")
+    # Attempt 2: OpenCV Multi-Index VideoCapture Probe (V4L2 device index 0 through 7)
+    # Often on Pi 5 / Linux, USB webcams or video nodes are at /dev/video1 or /dev/video2
+    for idx in range(8):
+        try:
+            cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
+            if not cap.isOpened():
+                cap = cv2.VideoCapture(idx)
+
+            if cap.isOpened():
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                cap.set(cv2.CAP_PROP_FPS, 30)
+                ret, test_frame = cap.read()
+                if ret and test_frame is not None and test_frame.size > 0:
+                    cv_cap = cap
+                    CAMERA_AVAILABLE = True
+                    CAMERA_TYPE = "opencv"
+                    CAMERA_DEVICE = f"/dev/video{idx}"
+                    CAMERA_ERROR_DETAIL = ""
+                    print(f"[+] OpenCV VideoCapture camera initialized successfully on /dev/video{idx}.")
+                    return
+                cap.release()
+        except Exception as e:
+            print(f"[-] OpenCV probe failed on index {idx}: {e}")
 
     CAMERA_AVAILABLE = False
     CAMERA_TYPE = None
-    print("[!] WARNING: Running in CAMERA-FREE mode. Hardware video feed will be unavailable.")
+    CAMERA_DEVICE = None
+    CAMERA_ERROR_DETAIL = f"Picamera2: {picam2_err or 'Not detected'}; OpenCV V4L2 (0-7): No working video device found"
+    print(f"[!] WARNING: Running in CAMERA-FREE mode. {CAMERA_ERROR_DETAIL}")
 
 
 def release_hardware_camera():
@@ -247,6 +269,8 @@ class SaveResponse(BaseModel):
 class StatusResponse(BaseModel):
     camera_available: bool
     camera_type: Optional[str]
+    camera_device: Optional[str] = None
+    camera_error: Optional[str] = None
     model_loaded: bool
     enrolled_users_count: int
     total_templates: int
@@ -497,6 +521,8 @@ async def get_status():
     return {
         "camera_available": CAMERA_AVAILABLE,
         "camera_type": CAMERA_TYPE,
+        "camera_device": CAMERA_DEVICE,
+        "camera_error": CAMERA_ERROR_DETAIL if not CAMERA_AVAILABLE else None,
         "model_loaded": (landmarker is not None),
         "enrolled_users_count": len(users),
         "total_templates": len(sig_data["template_ids"]),
