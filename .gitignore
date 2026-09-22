@@ -50,3 +50,8 @@ desktop.ini
 node_modules/
 web/node_modules/
 web/dist/
+
+# ── Internal Documentation & Research ─────────────────────────────────────────
+agent_report.md
+system_architecture.md
+*.pdf
