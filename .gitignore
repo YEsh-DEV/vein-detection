@@ -21,6 +21,7 @@ captures/
 roi_clahe/
 dataset/
 database/
+sample dataset/
 *.db
 *.db-shm
 *.db-wal
