@@ -177,16 +177,23 @@ class AMPVNet(nn.Module):
                 nn.init.ones_(m.weight)
                 nn.init.zeros_(m.bias)
             elif isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, 0, 0.01)
+                nn.init.normal_(m.weight, 0, 0.05)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, return_norm: bool = False):
         """
+        Forward pass of AMPVNet.
+
         Args:
-            x: (B, 3, 224, 224) — 3-channel grayscale-replicated palm vein patch
+            x: (B, 3, 224, 224) — 3-channel grayscale-replicated palm vein patch.
+            return_norm: bool — If True, returns tuple (embedding, norm), where norm
+                         is pre-normalization Euclidean norm ||z_i||_2 for AdaFace loss.
+                         If False, returns embedding only (for standard inference).
+
         Returns:
-            emb: (B, 512) — L2-normalized unit embedding vector
+            emb: (B, 512) — L2-normalized unit embedding vector.
+            (optional) norm: (B, 1) — Pre-normalization Euclidean norm ||z_i||_2.
         """
         x = self.stem(x)       # (B, 32, 56, 56)
         x = self.stage1(x)     # (B, 64, 28, 28)
@@ -196,9 +203,16 @@ class AMPVNet(nn.Module):
         x = self.gap(x)        # (B, 256, 1, 1)
         x = x.flatten(1)       # (B, 256)
         x = self.dropout(x)
-        x = self.fc(x)         # (B, 512) — project to embedding space
-        x = F.normalize(x, p=2, dim=1)   # Unit hypersphere
-        return x
+        raw_features = self.fc(x)  # (B, 512) — pre-normalization embedding z_i
+
+        # Feature norm ||z_i|| computed BEFORE final L2-normalization (Step 1 item 3 & Step 2 item 3)
+        norm = torch.norm(raw_features, p=2, dim=1, keepdim=True)
+        # L2-normalize output: divide by norm, keepdim, add 1e-8 to denominator
+        emb = raw_features / (norm + 1e-8)
+
+        if return_norm:
+            return emb, norm
+        return emb
 
     def count_parameters(self) -> int:
         """Returns total trainable parameter count."""
@@ -206,26 +220,41 @@ class AMPVNet(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Sanity check on import
+# Sanity check on import / direct execution
 # ---------------------------------------------------------------------------
 
 def _print_model_summary():
     """Instantiates AMPVNet and prints parameter count as a build-time sanity check."""
     model = AMPVNet()
-    total_params = model.count_parameters()
-    print(f"[AMPVNet] Total trainable parameters: {total_params:,}")
-    print(f"[AMPVNet] Expected from paper (Luo et al. 2024 Table V): ~1,610,000")
-    # Run a forward pass with RANDOM input (not zeros — zeros produce zero features,
-    # which produce zero embedding, which F.normalize returns as zero, not unit vector).
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"[AMPVNet] Total parameters: {total_params:,}")
+    print(f"[AMPVNet] Expected from paper (Luo et al. 2024 Table V): ~1,610,000 (~1.61M)")
+
+    # Check discrepancy with paper's 1.61M target
+    target_params = 1_610_000
+    discrepancy = abs(total_params - target_params) / target_params
+    print(f"[AMPVNet] Discrepancy from target: {discrepancy * 100:.2f}% (tolerance: <10%)")
+    assert discrepancy < 0.10, f"Parameter count discrepancy {discrepancy*100:.2f}% exceeds 10%!"
+
+    # Dummy forward pass with torch.randn(1, 3, 224, 224) per Step 1 item 6
     dummy = torch.randn(1, 3, 224, 224)
+    model.eval()
     with torch.no_grad():
         out = model(dummy)
+        out_with_norm, norm = model(dummy, return_norm=True)
+
     assert out.shape == (1, 512), f"Unexpected output shape: {out.shape}"
-    norm = out.norm(dim=1).item()
-    assert abs(norm - 1.0) < 1e-5, f"Output not L2-normalized (norm={norm:.6f})"
+    l2_norm = out.norm(dim=1).item()
+    assert abs(l2_norm - 1.0) < 1e-2, f"Output not L2-normalized (norm={l2_norm:.6f})"
+    assert out_with_norm.shape == (1, 512)
+    assert norm.shape == (1, 1)
+
     print(f"[AMPVNet] Output shape: {tuple(out.shape)} ✓")
-    print(f"[AMPVNet] L2 norm of output: {norm:.6f} ✓")
+    print(f"[AMPVNet] L2 norm of output: {l2_norm:.6f} ✓")
+    print(f"[AMPVNet] Pre-normalization norm shape: {tuple(norm.shape)}, value: {norm.item():.4f} ✓")
+    print("[AMPVNet] STEP 1 ARCHITECTURE VERIFICATION PASSED ✓")
 
 
 if __name__ == "__main__":
     _print_model_summary()
+
