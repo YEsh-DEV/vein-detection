@@ -5,6 +5,8 @@ server.py
 FastAPI + Uvicorn backend serving the Palm Vein Biometrics API & Neobrutalism Web UI.
 Directly connects to Raspberry Pi NoIR Camera (Picamera2) or USB Webcam (OpenCV).
 Features thread-safe camera locking, non-blocking threadpool offloading, and typed Pydantic contracts.
+
+v2 Architecture: Powered by AMPVNet CNN embeddings (ONNX Runtime) and in-memory cosine matching.
 """
 
 import os
@@ -50,7 +52,7 @@ try:
     )
     from app.db_manager import (
         init_db, enroll_user, user_exists, list_users,
-        delete_user, log_access, get_all_signatures,
+        delete_user, log_access, get_all_embeddings,
         get_templates_by_ids, get_username, reset_all_tables,
     )
     from app.search_engine import SearchEngine
@@ -59,7 +61,7 @@ try:
         extract_valleys_from_landmarks, segment_hand,
         extract_ma2017_scaled_roi, enhance_roi_vessels,
     )
-    from app.gabor import extract_veincode
+    from app.cnn_extractor import extract_embedding, MODEL_LOADED
 except ImportError:
     from constants import (
         PROJECT_ROOT, STATIC_DIR, CAPTURE_DIR, ROI_DIR, MODEL_PATH,
@@ -69,7 +71,7 @@ except ImportError:
     )
     from db_manager import (
         init_db, enroll_user, user_exists, list_users,
-        delete_user, log_access, get_all_signatures,
+        delete_user, log_access, get_all_embeddings,
         get_templates_by_ids, get_username, reset_all_tables,
     )
     from search_engine import SearchEngine
@@ -78,7 +80,7 @@ except ImportError:
         extract_valleys_from_landmarks, segment_hand,
         extract_ma2017_scaled_roi, enhance_roi_vessels,
     )
-    from gabor import extract_veincode
+    from cnn_extractor import extract_embedding, MODEL_LOADED
 
 # Ensure proper MIME types on all OS platforms (especially Windows)
 mimetypes.add_type("application/javascript", ".js")
@@ -129,7 +131,6 @@ def init_hardware_camera():
         print(f"[-] Picamera2 unavailable ({e}). Probing OpenCV V4L2 device nodes...")
 
     # Attempt 2: OpenCV Multi-Index VideoCapture Probe (V4L2 device index 0 through 7)
-    # Often on Pi 5 / Linux, USB webcams or video nodes are at /dev/video1 or /dev/video2
     for idx in range(8):
         try:
             cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
@@ -195,8 +196,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[!] Warning: Hand Landmarker failed to load ({e}).")
 
-    print("[*] Initializing Biometric Search Engine (4-core pool)...")
-    engine = SearchEngine(n_workers=4)
+    print("[*] Initializing Biometric Search Engine (In-RAM Cosine)...")
+    engine = SearchEngine()
     print("[+] Search Engine cache loaded.")
 
     print("[*] Probing camera hardware...")
@@ -215,8 +216,8 @@ async def lifespan(app: FastAPI):
 # ---------------------------------------------------------------------------
 app = FastAPI(
     title="Palm Vein Biometrics Server",
-    description="Local Biometric Authentication System for Raspberry Pi 5",
-    version="2.1.0",
+    description="Local Biometric Authentication System for Raspberry Pi 5 (AMPVNet CNN Engine)",
+    version="2.2.0",
     lifespan=lifespan,
 )
 
@@ -286,7 +287,7 @@ class ReportResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # In-Memory Enrollment Cache with TTL Expiry
 # ---------------------------------------------------------------------------
-# Structure: uname -> {"timestamp": float, "samples": list}
+# Structure: uname -> {"timestamp": float, "samples": list of np.ndarray embeddings}
 enrollment_cache = {}
 
 
@@ -324,8 +325,8 @@ def capture_frame_gray() -> np.ndarray:
 
 def process_image_with_timing(gray: np.ndarray):
     """
-    Extract CLAHE ROI and Gabor VeinCode from a grayscale hand frame while capturing
-    granular per-stage latency (landmark detection, ROI alignment/CLAHE, Gabor extraction).
+    Extract CLAHE ROI and AMPVNet CNN embedding from a grayscale hand frame while capturing
+    granular per-stage latency (landmark detection, ROI alignment/CLAHE, CNN embedding extraction).
     Raises ValueError if palm landmarks or valleys cannot be detected.
     """
     t_land0 = time.time()
@@ -341,33 +342,33 @@ def process_image_with_timing(gray: np.ndarray):
 
     t_roi0 = time.time()
     hand_mask = segment_hand(stretched)
-    roi_256, _, _ = extract_ma2017_scaled_roi(
+    roi_224, _, _ = extract_ma2017_scaled_roi(
         stretched, pv1, pv2, hand_mask,
-        target_size=256, scale_factor=1.5, offset_factor=0.35,
+        target_size=224, scale_factor=1.6, offset_factor=0.35,
         landmarks_px=landmarks
     )
-    if roi_256 is None or roi_256.size == 0:
+    if roi_224 is None or roi_224.size == 0:
         raise ValueError("Failed to extract palm ROI bounding box.")
 
-    clahe_roi = enhance_roi_vessels(roi_256)
+    clahe_roi = enhance_roi_vessels(roi_224)
     t_roi_ms = round((time.time() - t_roi0) * 1000, 2)
 
-    t_gab0 = time.time()
-    code = extract_veincode(clahe_roi)
-    t_gabor_ms = round((time.time() - t_gab0) * 1000, 2)
+    t_cnn0 = time.time()
+    embedding = extract_embedding(clahe_roi)
+    t_cnn_ms = round((time.time() - t_cnn0) * 1000, 2)
 
     timing = {
         'landmark_ms': t_landmark_ms,
         'roi_ms': t_roi_ms,
-        'gabor_ms': t_gabor_ms,
+        'cnn_embedding_ms': t_cnn_ms,
     }
-    return clahe_roi, code, timing
+    return clahe_roi, embedding, timing
 
 
 def process_image(gray: np.ndarray):
-    """Backward-compatible wrapper returning (clahe_roi, code)."""
-    clahe_roi, code, _ = process_image_with_timing(gray)
-    return clahe_roi, code
+    """Backward-compatible wrapper returning (clahe_roi, embedding)."""
+    clahe_roi, embedding, _ = process_image_with_timing(gray)
+    return clahe_roi, embedding
 
 
 def prune_scan_captures(max_count: int = 200, max_age_seconds: int = 48 * 3600):
@@ -457,7 +458,6 @@ def log_scan_diagnostic(
             "score": search_diag.get("score"),
             "threshold": search_diag.get("threshold", MATCH_THRESHOLD),
             "ranked_candidates": search_diag.get("ranked_candidates", []),
-            "l1_filtered_out": search_diag.get("l1_filtered_out", []),
             "latency_ms": latency_breakdown,
         }
 
@@ -517,15 +517,15 @@ def video_feed():
 @app.get("/api/status", response_model=StatusResponse)
 async def get_status():
     users = await run_in_threadpool(list_users)
-    sig_data = await run_in_threadpool(get_all_signatures)
+    emb_data = await run_in_threadpool(get_all_embeddings)
     return {
         "camera_available": CAMERA_AVAILABLE,
         "camera_type": CAMERA_TYPE,
         "camera_device": CAMERA_DEVICE,
         "camera_error": CAMERA_ERROR_DETAIL if not CAMERA_AVAILABLE else None,
-        "model_loaded": (landmarker is not None),
+        "model_loaded": (landmarker is not None and MODEL_LOADED),
         "enrolled_users_count": len(users),
-        "total_templates": len(sig_data["template_ids"]),
+        "total_templates": len(emb_data["template_ids"]),
         "match_threshold": float(MATCH_THRESHOLD),
     }
 
@@ -545,6 +545,9 @@ async def reset_database():
 
 @app.post("/api/scan", response_model=ScanResponse)
 async def scan_palm():
+    if not MODEL_LOADED:
+        raise HTTPException(status_code=503, detail="CNN model not loaded, cannot perform recognition.")
+
     if not CAMERA_AVAILABLE:
         raise HTTPException(status_code=503, detail="Camera hardware not available.")
 
@@ -557,7 +560,7 @@ async def scan_palm():
     t_capture_ms = round((time.time() - t_cap0) * 1000, 2)
 
     try:
-        clahe_roi, code, proc_timing = await asyncio.wait_for(
+        clahe_roi, embedding, proc_timing = await asyncio.wait_for(
             run_in_threadpool(process_image_with_timing, gray),
             timeout=15.0
         )
@@ -573,7 +576,7 @@ async def scan_palm():
 
     try:
         search_diag = await asyncio.wait_for(
-            run_in_threadpool(engine.identify_with_diagnostics, code),
+            run_in_threadpool(engine.identify_with_diagnostics, embedding),
             timeout=15.0
         )
     except asyncio.TimeoutError:
@@ -592,14 +595,13 @@ async def scan_palm():
     await run_in_threadpool(log_access, user_id=user_id if accepted else None, score=score, accepted=accepted)
     cap_path, roi_path = await run_in_threadpool(save_capture_to_disk, gray, clahe_roi, username or "unknown", "scan")
 
-    # Stage Latency Breakdown (Capture, Landmark, ROI, Gabor, Layer 1, Layer 2)
+    # Stage Latency Breakdown (Capture, Landmark, ROI, CNN Embedding, Matching, Total)
     latency_breakdown = {
         "capture": t_capture_ms,
         "landmark": proc_timing["landmark_ms"],
         "roi": proc_timing["roi_ms"],
-        "gabor": proc_timing["gabor_ms"],
-        "l1": search_diag["t_l1_ms"],
-        "l2": search_diag["t_l2_ms"],
+        "cnn_embedding": proc_timing["cnn_embedding_ms"],
+        "matching": search_diag["t_match_ms"],
         "total": t_total_ms,
     }
 
@@ -625,6 +627,12 @@ async def scan_palm():
 
 @app.post("/api/enroll/sample", response_model=SampleResponse)
 async def enroll_sample(req: SampleReq):
+    if not MODEL_LOADED:
+        raise HTTPException(
+            status_code=503,
+            detail="CNN model not loaded, cannot enroll"
+        )
+
     _cleanup_expired_enrollment_cache()
     uname = req.username.strip().lower()
 
@@ -656,7 +664,7 @@ async def enroll_sample(req: SampleReq):
         raise HTTPException(status_code=503, detail=str(e))
 
     try:
-        clahe_roi, code = await asyncio.wait_for(
+        clahe_roi, embedding = await asyncio.wait_for(
             run_in_threadpool(process_image, gray),
             timeout=15.0
         )
@@ -670,7 +678,7 @@ async def enroll_sample(req: SampleReq):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Extraction error: {e}")
 
-    current_samples.append(code)
+    current_samples.append(embedding)
     sample_idx = len(current_samples)
 
     await run_in_threadpool(save_capture_to_disk, gray, clahe_roi, uname, "enroll", idx=sample_idx)
@@ -681,7 +689,7 @@ async def enroll_sample(req: SampleReq):
     return {
         "success": True,
         "sample_count": sample_idx,
-        "vr_mean": float(code["VR"].mean()),
+        "vr_mean": 1.0,
         "thumb": b64_roi,
     }
 
@@ -738,18 +746,10 @@ async def cancel_enrollment(req: CancelReq):
 async def get_report():
     def _compute_report():
         users = list_users()
-        sig_data = get_all_signatures()
-        uid_map = {}
-        for uid in sig_data["user_ids"]:
-            if uid not in uid_map.values():
-                try:
-                    uid_map[get_username(uid)] = uid
-                except KeyError:
-                    pass
-
+        emb_data = get_all_embeddings()
         return {
             "users": users,
-            "total_templates": len(sig_data["template_ids"]),
+            "total_templates": len(emb_data["template_ids"]),
         }
 
     data = await run_in_threadpool(_compute_report)
@@ -795,6 +795,6 @@ if __name__ == "__main__":
                 webbrowser.open("http://localhost:8000")
             except Exception:
                 pass
-        threading.Thread(target=_open_browser, daemon=True).start()
+            threading.Thread(target=_open_browser, daemon=True).start()
 
     uvicorn.run("app.server:app", host="0.0.0.0", port=8000, reload=False)
