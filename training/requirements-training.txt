@@ -1,0 +1,43 @@
+# training/requirements-training.txt
+# ====================================
+# Training environment dependencies for AMPVNet + AdaFace pipeline.
+#
+# IMPORTANT: These are NOT the Pi 5 deployment requirements.
+#   Pi 5 runtime uses: app/requirements.txt (fastapi, opencv, mediapipe, onnxruntime)
+#   This file is ONLY for the machine you train on (desktop/cloud GPU or CPU).
+#
+# Install with:
+#   pip install -r training/requirements-training.txt
+#
+# Recommended training environment:
+#   Python 3.10+, CUDA 12.x (if GPU available), 16GB+ RAM
+#   Training on Pi 5 CPU is possible but slow (~30 min/epoch for CASIA).
+
+# ---- Core Deep Learning ----
+torch>=2.1.0               # PyTorch: AMPVNet backbone, AdaFace loss, training loop
+torchvision>=0.16.0        # DataLoader, transforms (RandomPerspective, ToTensor, Normalize)
+
+# ---- Computer Vision ----
+opencv-python>=4.10.0      # Image loading, ROI preprocessing, CLAHE
+Pillow>=10.0.0             # PIL Image for torchvision transforms
+
+# ---- Scientific Computing ----
+numpy>=1.26.0              # Array operations in evaluation and dataset loading
+scipy>=1.14.0              # Interpolation in EER calculation (fallback if sklearn missing)
+
+# ---- Model Evaluation ----
+scikit-learn>=1.3.0        # roc_curve for EER computation in evaluate.py
+                           # (optional but strongly recommended)
+
+# ---- ONNX Export & Validation ----
+onnx>=1.15.0               # ONNX graph construction and validation in export_onnx.py
+onnxruntime>=1.17.0        # CPU-based ONNX inference for export validation
+                           # On the Pi 5, use: pip install onnxruntime (ARM64 wheel)
+
+# ---- Optional: Training Experiment Tracking ----
+# Uncomment if you want live training dashboards:
+# tensorboard>=2.15.0      # TensorBoard logging (add writer to train.py manually)
+# wandb>=0.16.0            # Weights & Biases (requires API key)
+
+# ---- Optional: Accelerated Data Loading ----
+# albumentations>=1.4.0   # Alternative fast augmentation library (not required; RPT+RGA done in-house)

@@ -1,0 +1,42 @@
+# training/.gitignore
+# ====================
+# Exclude large/generated files from the training directory.
+# Only source code, configs, and empty-placeholder .gitkeep files are tracked.
+
+# --- Checkpoints (large binary .pt files) ---
+checkpoints/*.pt
+checkpoints/*.pth
+checkpoints/*.ckpt
+# Keep the directory itself tracked via .gitkeep
+!checkpoints/.gitkeep
+
+# --- Raw data (never commit dataset images) ---
+data_raw/casia/*/
+data_raw/own/*/
+# Keep placeholder directories tracked
+!data_raw/casia/.gitkeep
+!data_raw/own/.gitkeep
+
+# --- Logs (generated at runtime) ---
+logs/*.log
+logs/*.txt
+logs/*.json
+!logs/.gitkeep
+
+# --- ONNX outputs ---
+*.onnx
+*.onnx_meta.json
+
+# --- Python bytecode ---
+__pycache__/
+*.py[cod]
+*.pyo
+
+# --- Jupyter notebooks (if any) ---
+*.ipynb
+.ipynb_checkpoints/
+
+# --- Temporary files ---
+*.tmp
+*.bak
+*.swp
