@@ -3,26 +3,26 @@
 real_data_analysis.py
 ---------------------
 Offline real-data mining and biometric diagnostics for the Palm Vein Biometric System.
+v2 Architecture: Evaluates 512-dim CNN embeddings using cosine similarity.
 
 Mines real ground truth data from:
-1. data/palm_vein.db (stored enrollment templates, VR, VI, and 64-float signatures).
+1. data/palm_vein.db (stored enrollment templates with 512-dim float32 embeddings).
 2. roi_clahe/ (real captured scan-time CLAHE ROIs).
 3. captures/ and access_log table (session timestamp cross-referencing).
 
 Performs:
-- Full all-pairs template comparisons across Layer 1 (64-float Euclidean signature distance)
-  and Layer 2 (multi-rotation MNHD with angle bracket).
+- Full all-pairs cosine similarity comparisons between enrolled templates.
 - Scan-time probe feature extraction and full identification simulation.
-- Genuine vs Impostor score distributions (min, mean, max, std).
-- Precise identification of False Accept and False Reject cases with per-layer score breakdowns.
-- Empirical threshold sweep table (FAR / FRR at 0.30, 0.35, 0.365, 0.38, 0.40, 0.45).
+- Genuine vs Impostor cosine similarity distributions (min, mean, max, std).
+- Precise identification of False Accept and False Reject cases.
+- Empirical threshold sweep table (FAR / FRR at 0.3, 0.4, 0.5, 0.6, 0.7, 0.8).
 """
 
 import os
 import sys
 import glob
 import time
-import zlib
+import re
 import json
 import sqlite3
 import argparse
@@ -37,18 +37,14 @@ if PROJECT_ROOT not in sys.path:
 
 try:
     from app.constants import (
-        MATCH_THRESHOLD, L1_THRESHOLD, DB_PATH, ROI_DIR, CAPTURE_DIR,
-        LOGS_DIR, TOP_K, L1_BYPASS_MAX_TEMPLATES,
+        MATCH_THRESHOLD, DB_PATH, ROI_DIR, CAPTURE_DIR, LOGS_DIR, EMBEDDING_DIM,
     )
-    from app.gabor import match_templates, extract_veincode
-    from app.db_manager import compute_signature
+    from app.cnn_extractor import extract_embedding, cosine_similarity, MODEL_LOADED
 except ImportError:
     from constants import (
-        MATCH_THRESHOLD, L1_THRESHOLD, DB_PATH, ROI_DIR, CAPTURE_DIR,
-        LOGS_DIR, TOP_K, L1_BYPASS_MAX_TEMPLATES,
+        MATCH_THRESHOLD, DB_PATH, ROI_DIR, CAPTURE_DIR, LOGS_DIR, EMBEDDING_DIM,
     )
-    from gabor import match_templates, extract_veincode
-    from db_manager import compute_signature
+    from cnn_extractor import extract_embedding, cosine_similarity, MODEL_LOADED
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +57,7 @@ def load_enrolled_templates(db_path: str) -> tuple:
     Returns:
         users: {user_id: {'username': str, 'active': int, 'enrolled_at': str}}
         templates: list of dicts with keys:
-            'id', 'user_id', 'username', 'sample_idx', 'VR', 'VI', 'signature', 'vr_mean', 'vi_mean'
+            'id', 'user_id', 'username', 'sample_idx', 'embedding'
     """
     if not os.path.exists(db_path):
         print(f"[!] Database file not found at: {db_path}")
@@ -80,32 +76,31 @@ def load_enrolled_templates(db_path: str) -> tuple:
                 'enrolled_at': enrolled_at,
             }
 
-        # Load templates for active users (or all if specified)
+        # Check column names in templates table
+        cur = conn.execute("PRAGMA table_info(templates)")
+        cols = [c[1] for c in cur.fetchall()]
+        if 'embedding' not in cols:
+            print("[!] Legacy templates table detected without 'embedding' column. Run init_db() to migrate.")
+            return users, []
+
         cur = conn.execute(
             """
-            SELECT t.id, t.user_id, t.sample_idx, t.vr_blob, t.vi_blob,
-                   t.signature, t.vr_mean, t.vi_mean, u.username
+            SELECT t.id, t.user_id, t.sample_idx, t.embedding, u.username
             FROM   templates t
             JOIN   users u ON u.id = t.user_id
             ORDER  BY t.user_id, t.sample_idx
             """
         )
 
-        for tid, uid, s_idx, vr_blob, vi_blob, sig_blob, vr_mean, vi_mean, uname in cur.fetchall():
+        for tid, uid, s_idx, emb_blob, uname in cur.fetchall():
             try:
-                VR = np.frombuffer(zlib.decompress(vr_blob), dtype=np.uint8).reshape(256, 256)
-                VI = np.frombuffer(zlib.decompress(vi_blob), dtype=np.uint8).reshape(256, 256)
-                sig = np.frombuffer(sig_blob, dtype=np.float32)
+                emb = np.frombuffer(emb_blob, dtype=np.float32).copy()
                 templates.append({
                     'id': tid,
                     'user_id': uid,
                     'username': uname,
                     'sample_idx': s_idx,
-                    'VR': VR,
-                    'VI': VI,
-                    'signature': sig,
-                    'vr_mean': vr_mean,
-                    'vi_mean': vi_mean,
+                    'embedding': emb,
                 })
             except Exception as e:
                 print(f"[!] Warning: Failed unpacking template id={tid}: {e}")
@@ -114,13 +109,13 @@ def load_enrolled_templates(db_path: str) -> tuple:
 
 
 # ---------------------------------------------------------------------------
-# All-Pairs Enrolled Template Evaluation
+# All-Pairs Enrolled Template Evaluation (Cosine Similarity)
 # ---------------------------------------------------------------------------
 
 def evaluate_all_pairs_templates(templates: list) -> dict:
     """
-    Re-runs the full pipeline (Layer 1 signature filter + Layer 2 MNHD)
-    as all-pairs comparison between every enrolled template.
+    Computes all-pairs cosine similarity between every enrolled template.
+    Genuine pairs = same user_id. Impostor pairs = different user_id.
     """
     genuine_scores = []
     impostor_scores = []
@@ -134,13 +129,7 @@ def evaluate_all_pairs_templates(templates: list) -> dict:
             t1 = templates[i]
             t2 = templates[j]
 
-            # Layer 1: Euclidean distance on 64-float signatures
-            l1_dist = float(np.linalg.norm(t1['signature'] - t2['signature']))
-            l1_filtered = (l1_dist >= L1_THRESHOLD)
-
-            # Layer 2: MNHD with angle bracket
-            l2_score = float(match_templates(t1, t2))
-
+            sim = cosine_similarity(t1['embedding'], t2['embedding'])
             is_genuine = (t1['user_id'] == t2['user_id'])
 
             record = {
@@ -149,16 +138,14 @@ def evaluate_all_pairs_templates(templates: list) -> dict:
                 'u1': t1['username'],
                 'u2': t2['username'],
                 'is_genuine': is_genuine,
-                'l1_dist': l1_dist,
-                'l1_filtered': l1_filtered,
-                'l2_score': l2_score,
+                'score': sim,
             }
             comparisons.append(record)
 
             if is_genuine:
-                genuine_scores.append(l2_score)
+                genuine_scores.append(sim)
             else:
-                impostor_scores.append(l2_score)
+                impostor_scores.append(sim)
 
     return {
         'comparisons': comparisons,
@@ -173,7 +160,6 @@ def evaluate_all_pairs_templates(templates: list) -> dict:
 
 def parse_scan_timestamp(filename: str):
     """Extract timestamp string or datetime from standard filename."""
-    # Pattern: ..._YYYYMMDD_HHMMSS...
     m = re.search(r'(\d{8}_\d{6})', filename)
     if m:
         try:
@@ -184,35 +170,27 @@ def parse_scan_timestamp(filename: str):
 
 
 def resolve_ground_truth(filename: str, enrolled_usernames: list, access_logs: list) -> str:
-    """
-    Resolves the ground truth identity for a scan ROI file:
-    1. Checks filename prefix for exact match with enrolled usernames.
-    2. For 'unknown_scan' files, correlates timestamp with nearby access_log or labeled scans.
-    """
+    """Resolves ground truth identity for a scan ROI file."""
     basename = os.path.basename(filename)
 
-    # Direct username prefix match
     for uname in enrolled_usernames:
         if basename.startswith(uname + "_") or basename.startswith(uname + "-"):
             return uname
 
-    # Check for known names like yesh, nassir
     lower_base = basename.lower()
     for name in ['yesh', 'nassir']:
         if name in lower_base and not lower_base.startswith("unknown"):
-            # Try to match to full username in enrolled_usernames
             for u in enrolled_usernames:
                 if name in u.lower():
                     return u
 
-    # Ambiguous or unknown_scan: cross-reference with access_log by timestamp
     file_dt = parse_scan_timestamp(basename)
     if file_dt and access_logs:
         closest_log = None
         min_delta = float('inf')
         for log in access_logs:
             delta = abs((file_dt - log['dt']).total_seconds())
-            if delta < min_delta and delta <= 90:  # within 90-second session window
+            if delta < min_delta and delta <= 90:
                 min_delta = delta
                 closest_log = log
 
@@ -231,7 +209,7 @@ def load_access_logs(db_path: str) -> list:
         with sqlite3.connect(db_path) as conn:
             cur = conn.execute(
                 """
-                SELECT a.timestamp, u.username, a.score, a.accepted
+                SELECT a.scan_at, u.username, a.score, a.accepted
                 FROM   access_log a
                 LEFT JOIN users u ON u.id = a.user_id
                 ORDER  BY a.id
@@ -254,23 +232,22 @@ def load_access_logs(db_path: str) -> list:
 
 def mine_scan_rois(roi_dir: str, templates: list, users: dict, db_path: str) -> dict:
     """
-    Extracts VeinCodes for saved scan ROIs, computes full candidate rankings,
-    and checks Layer 1 filter behavior and Layer 2 matching.
+    Extracts CNN embeddings for saved scan ROIs and evaluates cosine matching.
     """
     scan_files = glob.glob(os.path.join(roi_dir, "*scan*.png"))
     if not scan_files:
-        # Fallback to any png in roi_dir that isn't clearly enroll
         scan_files = [f for f in glob.glob(os.path.join(roi_dir, "*.png")) if "_enroll_" not in f]
 
     print(f"[*] Found {len(scan_files)} scan ROI files in {roi_dir}")
     if not scan_files or not templates:
         return {'scan_results': [], 'genuine_scores': np.array([]), 'impostor_scores': np.array([])}
 
+    if not MODEL_LOADED:
+        print("[!] Warning: CNN ONNX model not loaded. Skipping scan ROI embedding extraction.")
+        return {'scan_results': [], 'genuine_scores': np.array([]), 'impostor_scores': np.array([])}
+
     enrolled_usernames = [u['username'] for u in users.values() if u['active']]
     access_logs = load_access_logs(db_path)
-
-    # Pre-index template signatures
-    template_sigs = np.stack([t['signature'] for t in templates], axis=0)
 
     scan_results = []
     genuine_scores = []
@@ -280,64 +257,41 @@ def mine_scan_rois(roi_dir: str, templates: list, users: dict, db_path: str) -> 
         fname = os.path.basename(fpath)
         ground_truth = resolve_ground_truth(fname, enrolled_usernames, access_logs)
 
-        # Read CLAHE ROI image
         img = cv2.imread(fpath, cv2.IMREAD_GRAYSCALE)
         if img is None:
             continue
-        if img.shape != (256, 256):
-            img = cv2.resize(img, (256, 256))
+        if img.shape != (224, 224):
+            img = cv2.resize(img, (224, 224))
 
         try:
-            probe_code = extract_veincode(img)
-            probe_sig = compute_signature(probe_code['VR'], probe_code.get('VI'))
+            probe_emb = extract_embedding(img)
         except Exception as e:
-            print(f"[!] Error extracting VeinCode from {fname}: {e}")
+            print(f"[!] Error extracting embedding from {fname}: {e}")
             continue
 
-        # Layer 1: compute Euclidean distance to all templates
-        l1_dists = np.linalg.norm(template_sigs - probe_sig, axis=1)
-
-        # Layer 2: compute MNHD against all templates
         evaluations = []
         user_scores = {}
-        user_l1_dists = {}
 
-        for t_idx, t in enumerate(templates):
-            dist_l1 = float(l1_dists[t_idx])
-            score_l2 = float(match_templates(t, probe_code))
+        for t in templates:
+            score = cosine_similarity(t['embedding'], probe_emb)
             uname = t['username']
 
             evaluations.append({
                 'template_id': t['id'],
                 'username': uname,
                 'sample_idx': t['sample_idx'],
-                'l1_dist': dist_l1,
-                'l1_filtered': (dist_l1 >= L1_THRESHOLD),
-                'l2_score': score_l2,
+                'score': score,
             })
 
-            # User aggregation: best (minimum) L2 score across poses
-            if uname not in user_scores or score_l2 < user_scores[uname]:
-                user_scores[uname] = score_l2
-            if uname not in user_l1_dists or dist_l1 < user_l1_dists[uname]:
-                user_l1_dists[uname] = dist_l1
+            # User aggregation: BEST (MAX) similarity score across templates
+            if uname not in user_scores or score > user_scores[uname]:
+                user_scores[uname] = score
 
-        # Winning candidate
-        ranked_users = sorted(user_scores.items(), key=lambda x: x[1])
+        ranked_users = sorted(user_scores.items(), key=lambda x: x[1], reverse=True)
         winner_uname, winner_score = ranked_users[0]
-        winner_l1 = user_l1_dists[winner_uname]
 
-        # Check ground-truth specifics
         gt_in_enrolled = (ground_truth in user_scores)
         gt_score = user_scores.get(ground_truth, None)
-        gt_l1 = user_l1_dists.get(ground_truth, None)
-
-        # Check if Layer 1 would have filtered out the genuine user
-        # (i.e. ALL templates of ground-truth had l1_dist >= L1_THRESHOLD)
-        gt_l1_filtered_out = False
-        if gt_in_enrolled:
-            gt_templates_l1 = [e['l1_dist'] for e in evaluations if e['username'] == ground_truth]
-            gt_l1_filtered_out = all(d >= L1_THRESHOLD for d in gt_templates_l1)
 
         record = {
             'filename': fname,
@@ -345,16 +299,12 @@ def mine_scan_rois(roi_dir: str, templates: list, users: dict, db_path: str) -> 
             'gt_in_enrolled': gt_in_enrolled,
             'winner_user': winner_uname,
             'winner_score': winner_score,
-            'winner_l1': winner_l1,
             'gt_score': gt_score,
-            'gt_l1': gt_l1,
-            'gt_l1_filtered_out': gt_l1_filtered_out,
             'ranked_users': ranked_users,
             'evaluations': evaluations,
         }
         scan_results.append(record)
 
-        # Record scores into distribution
         for uname, score in user_scores.items():
             if gt_in_enrolled and uname == ground_truth:
                 genuine_scores.append(score)
@@ -386,12 +336,12 @@ def calculate_stats(scores: np.ndarray) -> dict:
 
 
 def print_score_distribution(title: str, genuine: np.ndarray, impostor: np.ndarray):
-    """Prints a formatted score distribution table."""
+    """Prints a formatted score distribution table (Cosine Similarity: Higher is Better)."""
     g_stats = calculate_stats(genuine)
     i_stats = calculate_stats(impostor)
 
     print(f"\n{'=' * 65}")
-    print(f" {title.upper()}")
+    print(f" {title.upper()} (COSINE SIMILARITY: HIGHER = BETTER)")
     print(f"{'=' * 65}")
     print(f"{'Metric':<18} | {'Genuine (Same Palm)':<20} | {'Impostor (Different Palm)':<20}")
     print(f"{'-' * 18}-+-{'-' * 20}-+-{'-' * 20}")
@@ -402,18 +352,16 @@ def print_score_distribution(title: str, genuine: np.ndarray, impostor: np.ndarr
     print(f"{'Std Deviation':<18} | {g_stats['std']:<20.4f} | {i_stats['std']:<20.4f}")
 
     if g_stats['count'] > 0 and i_stats['count'] > 0:
-        gap = i_stats['min'] - g_stats['max']
+        gap = g_stats['min'] - i_stats['max']
         gap_str = f"{gap:+.4f}"
         status = "PERFECT SEPARATION (NO OVERLAP)" if gap > 0 else "OVERLAP DETECTED (TUNING REQUIRED)"
-        print(f"\nSeparation Gap (Impostor Min - Genuine Max): {gap_str}  -->  {status}")
+        print(f"\nSeparation Gap (Genuine Min - Impostor Max): {gap_str}  -->  {status}")
 
 
 def flag_errors_and_near_misses(scan_results: list, threshold: float):
     """
-    Specifically flags every case where:
-    1. Scan matched the WRONG identity (False Accept).
-    2. Scan failed to match the RIGHT identity (False Reject).
-    3. Layer 1 excluded the correct candidate before Layer 2 had a chance.
+    Specifically flags False Accepts and False Rejects.
+    Note: Under cosine similarity, score >= threshold indicates ACCEPT.
     """
     print(f"\n{'=' * 75}")
     print(f" ERROR AUDIT & NEAR-MISS ANALYSIS (MATCH_THRESHOLD = {threshold:.4f})")
@@ -421,7 +369,6 @@ def flag_errors_and_near_misses(scan_results: list, threshold: float):
 
     false_accepts = []
     false_rejects = []
-    l1_premature_filters = []
 
     for res in scan_results:
         fname = res['filename']
@@ -429,62 +376,44 @@ def flag_errors_and_near_misses(scan_results: list, threshold: float):
         winner = res['winner_user']
         score = res['winner_score']
         gt_in_enrolled = res['gt_in_enrolled']
-        accepted = (score <= threshold)
-
-        # Check Layer 1 filter failure on genuine palm
-        if gt_in_enrolled and res['gt_l1_filtered_out']:
-            l1_premature_filters.append(res)
+        accepted = (score >= threshold)
 
         if accepted:
-            # False Accept: Accepted as winner, but winner != ground truth
             if winner != gt:
                 false_accepts.append(res)
         else:
-            # False Reject: Genuine user rejected
             if gt_in_enrolled:
                 false_rejects.append(res)
 
-    print(f"Total Scans Audited         : {len(scan_results)}")
-    print(f"False Accepts (FA)          : {len(false_accepts)}")
-    print(f"False Rejects (FR)          : {len(false_rejects)}")
-    print(f"Layer 1 Premature Exclusions: {len(l1_premature_filters)}")
+    print(f"Total Scans Audited: {len(scan_results)}")
+    print(f"False Accepts (FA) : {len(false_accepts)}")
+    print(f"False Rejects (FR) : {len(false_rejects)}")
 
-    # Print Layer 1 Premature Filter Failures
-    if l1_premature_filters:
-        print(f"\n[!] ALERT: {len(l1_premature_filters)} genuine scans were filtered out by Layer 1!")
-        print(f"{'Scan Filename':<32} | {'True User':<16} | {'True L1 Dist':<12} | {'L1 Threshold'}")
-        print(f"{'-' * 32}-+-{'-' * 16}-+-{'-' * 12}-+-{'-' * 12}")
-        for r in l1_premature_filters:
-            print(f"{r['filename']:<32} | {r['ground_truth']:<16} | {r['gt_l1']:<12.4f} | {L1_THRESHOLD:.4f}")
-
-    # Print False Accepts
     if false_accepts:
         print(f"\n[!] FALSE ACCEPT DETAILS ({len(false_accepts)} cases):")
-        print(f"{'Scan Filename':<26} | {'Ground Truth':<15} | {'Accepted As':<15} | {'Score':<8} | {'GT Score':<8} | {'Winner L1'}")
-        print(f"{'-' * 26}-+-{'-' * 15}-+-{'-' * 15}-+-{'-' * 8}-+-{'-' * 8}-+-{'-' * 9}")
+        print(f"{'Scan Filename':<26} | {'Ground Truth':<15} | {'Accepted As':<15} | {'Score':<8} | {'GT Score':<8}")
+        print(f"{'-' * 26}-+-{'-' * 15}-+-{'-' * 15}-+-{'-' * 8}-+-{'-' * 8}")
         for fa in false_accepts:
             gt_s_str = f"{fa['gt_score']:.4f}" if fa['gt_score'] is not None else "N/A"
-            print(f"{fa['filename']:<26} | {fa['ground_truth']:<15} | {fa['winner_user']:<15} | {fa['winner_score']:<8.4f} | {gt_s_str:<8} | {fa['winner_l1']:<9.4f}")
+            print(f"{fa['filename']:<26} | {fa['ground_truth']:<15} | {fa['winner_user']:<15} | {fa['winner_score']:<8.4f} | {gt_s_str:<8}")
     else:
         print("\n[+] Zero False Accepts detected at current threshold.")
 
-    # Print False Rejects
     if false_rejects:
         print(f"\n[!] FALSE REJECT DETAILS ({len(false_rejects)} cases):")
-        print(f"{'Scan Filename':<28} | {'Ground Truth':<16} | {'Score':<8} | {'Threshold':<9} | {'L1 Dist':<8} | {'L1 Filtered?'}")
-        print(f"{'-' * 28}-+-{'-' * 16}-+-{'-' * 8}-+-{'-' * 9}-+-{'-' * 8}-+-{'-' * 12}")
+        print(f"{'Scan Filename':<28} | {'Ground Truth':<16} | {'Score':<8} | {'Threshold':<9}")
+        print(f"{'-' * 28}-+-{'-' * 16}-+-{'-' * 8}-+-{'-' * 9}")
         for fr in false_rejects:
-            l1_str = f"{fr['gt_l1']:.4f}" if fr['gt_l1'] is not None else "N/A"
-            filt_str = "YES (PREMATURE)" if fr['gt_l1_filtered_out'] else "NO"
-            print(f"{fr['filename']:<28} | {fr['ground_truth']:<16} | {fr['winner_score']:<8.4f} | {threshold:<9.4f} | {l1_str:<8} | {filt_str}")
+            print(f"{fr['filename']:<28} | {fr['ground_truth']:<16} | {fr['winner_score']:<8.4f} | {threshold:<9.4f}")
     else:
         print("[+] Zero False Rejects detected at current threshold.")
 
 
 def compute_threshold_sweep(genuine_scores: np.ndarray, impostor_scores: np.ndarray,
-                            thresholds=(0.30, 0.35, 0.365, 0.38, 0.40, 0.45)):
+                            thresholds=(0.3, 0.4, 0.5, 0.6, 0.7, 0.8)):
     """
-    Computes and prints the FAR/FRR threshold sweep table on real data.
+    Computes and prints the FAR/FRR threshold sweep table on real cosine similarity data.
+    Decision: score >= tau ACCEPTS, score < tau REJECTS.
     """
     print(f"\n{'=' * 75}")
     print(f" REAL-DATA THRESHOLD SWEEP TABLE (FAR / FRR)")
@@ -504,8 +433,10 @@ def compute_threshold_sweep(genuine_scores: np.ndarray, impostor_scores: np.ndar
     eer_point = None
 
     for tau in thresholds:
-        fa_count = int(np.sum(impostor_scores <= tau)) if n_imp > 0 else 0
-        fr_count = int(np.sum(genuine_scores > tau)) if n_gen > 0 else 0
+        # Impostor accepted if similarity >= tau
+        fa_count = int(np.sum(impostor_scores >= tau)) if n_imp > 0 else 0
+        # Genuine rejected if similarity < tau
+        fr_count = int(np.sum(genuine_scores < tau)) if n_gen > 0 else 0
 
         far = (fa_count / n_imp * 100.0) if n_imp > 0 else 0.0
         frr = (fr_count / n_gen * 100.0) if n_gen > 0 else 0.0
@@ -519,6 +450,7 @@ def compute_threshold_sweep(genuine_scores: np.ndarray, impostor_scores: np.ndar
 
     if eer_point:
         print(f"\nEmpirical EER Estimate: ~{eer_point[1]:.2f}% near threshold {eer_point[0]:.4f}")
+        print("NOTE: This script reports metrics for review. Update MATCH_THRESHOLD in constants.py manually.")
 
 
 # ---------------------------------------------------------------------------
@@ -527,7 +459,7 @@ def compute_threshold_sweep(genuine_scores: np.ndarray, impostor_scores: np.ndar
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Mine real captured palm vein templates & ROI scans for empirical accuracy."
+        description="Mine real captured palm vein templates & ROI scans for empirical accuracy (v2 CNN embeddings)."
     )
     parser.add_argument(
         "--db", default=DB_PATH,
@@ -549,7 +481,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 75)
-    print(" PALM VEIN BIOMETRIC REAL-DATA DIAGNOSTICS & ACCURACY AUDIT")
+    print(" PALM VEIN BIOMETRIC REAL-DATA DIAGNOSTICS & ACCURACY AUDIT (v2 CNN)")
     print("=" * 75)
     print(f"Database   : {args.db}")
     print(f"ROI Dir    : {args.roi_dir}")
@@ -566,7 +498,7 @@ def main():
         print(f"    - User '{uinfo['username']}' (ID {uid}, {status}): {len(u_templates)} template(s)")
 
     if not templates:
-        print("\n[!] No enrolled templates found in database. Exiting analysis.")
+        print("\n[*] No enrolled templates found in database (or templates table empty). Exiting analysis.")
         return
 
     # 2. All-Pairs Template Analysis
@@ -588,12 +520,11 @@ def main():
         )
         flag_errors_and_near_misses(scan_analysis['scan_results'], args.threshold)
 
-        # Combined distributions for overall sweep
         comb_genuine = np.concatenate([template_results['genuine_scores'], scan_analysis['genuine_scores']])
         comb_impostor = np.concatenate([template_results['impostor_scores'], scan_analysis['impostor_scores']])
         compute_threshold_sweep(comb_genuine, comb_impostor)
     else:
-        print("\n[*] No scan ROI images to evaluate; running sweep on enrolled template pairs:")
+        print("\n[*] No scan ROI images evaluated; running sweep on enrolled template pairs:")
         compute_threshold_sweep(template_results['genuine_scores'], template_results['impostor_scores'])
 
     # 4. Optional JSON export
