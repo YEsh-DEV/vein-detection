@@ -121,6 +121,8 @@ class PalmVeinDataset(Dataset):
         gamma_rga: float = 0.6,
         p_rga: float = 0.3,
         transform: Optional[T.Compose] = None,
+        is_train: Optional[bool] = None,
+        max_classes: Optional[int] = None,
     ):
         """
         Args:
@@ -133,6 +135,8 @@ class PalmVeinDataset(Dataset):
             gamma_rga: RGA gamma parameter.
             p_rga: RGA probability.
             transform: Custom transform override (if None, standard transforms are built).
+            is_train: Explicit override for train vs inference transform (default: split == 'train').
+            max_classes: Optional maximum number of classes to load.
         """
         self.data_dir = Path(data_dir)
         self.split = split
@@ -173,6 +177,9 @@ class PalmVeinDataset(Dataset):
         else:
             raise ValueError(f"Unknown split: {self.split}. Expected 'train', 'val', or 'all'.")
 
+        if max_classes is not None and max_classes > 0:
+            active_subjects = active_subjects[:max_classes]
+
         # Map active subjects to consecutive integer labels [0, num_classes - 1]
         active_subjects = sorted(active_subjects, key=lambda d: d.name)
         self.subject_to_label: Dict[str, int] = {
@@ -193,10 +200,11 @@ class PalmVeinDataset(Dataset):
             raise ValueError(f"No valid image files found for split '{self.split}' in {self.data_dir}")
 
         # Setup transforms
+        training_mode = is_train if is_train is not None else (self.split == "train")
         if transform is not None:
             self.transform = transform
         else:
-            if self.split == "train":
+            if training_mode:
                 self.transform = build_train_transform(
                     image_size=224,
                     r_rpt=r_rpt,

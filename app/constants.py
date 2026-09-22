@@ -20,7 +20,9 @@ DB_PATH = os.path.join(DATA_DIR, "palm_vein.db")
 
 MODELS_DIR = os.path.join(PROJECT_ROOT, "models")
 MODEL_PATH = os.path.join(MODELS_DIR, "hand_landmarker.task")
-AMPVNET_ONNX_PATH = os.path.join(MODELS_DIR, "ampvnet.onnx")
+AMPVNET_FINETUNED_ONNX_PATH = os.path.join(MODELS_DIR, "ampvnet_finetuned.onnx")
+AMPVNET_DEFAULT_ONNX_PATH = os.path.join(MODELS_DIR, "ampvnet.onnx")
+AMPVNET_ONNX_PATH = AMPVNET_FINETUNED_ONNX_PATH if os.path.exists(AMPVNET_FINETUNED_ONNX_PATH) else AMPVNET_DEFAULT_ONNX_PATH
 EMBEDDING_DIM = 512
 
 STATIC_DIR = os.path.join(PROJECT_ROOT, "web", "static")
@@ -29,6 +31,11 @@ ROI_DIR = os.path.join(PROJECT_ROOT, "roi_clahe")
 DATASET_DIR = os.path.join(PROJECT_ROOT, "dataset")
 LOGS_DIR = os.path.join(PROJECT_ROOT, "logs")
 SCAN_DIAGNOSTICS_LOG = os.path.join(LOGS_DIR, "scan_diagnostics.jsonl")
+
+# Temporary Diagnostic & Debug Mode (Stage 4 Phase A4)
+# Disabled by default. When enabled, writes raw frames, landmark overlays, and ROIs to debug_frames/
+DEBUG_DIAGNOSTICS_MODE = os.environ.get("DEBUG_DIAGNOSTICS_MODE", "false").lower() in ("true", "1", "yes")
+DEBUG_FRAMES_DIR = os.path.join(PROJECT_ROOT, "debug_frames")
 
 # Ensure runtime directories exist
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -39,13 +46,16 @@ os.makedirs(LOGS_DIR, exist_ok=True)
 
 
 # ---------------------------------------------------------------------------
-# Biometric Matching Thresholds & Tolerances (v2 CNN Embedding Pipeline)
+# Biometric Engine & Threshold Configuration (Phase 8 & 13)
 # ---------------------------------------------------------------------------
-# PLACEHOLDER — cosine similarity threshold, NOT calibrated on real data.
-# Must be set via a real FAR/FRR/EER sweep (see tools/real_data_analysis.py, which
-# needs updating for embeddings — see Step 4 below) using real enrolled users'
-# embeddings before this system is used for anything beyond internal testing.
-MATCH_THRESHOLD = 0.5
+# Feature flag for engine selection: 'v2' (AMPVNet CNN) or 'legacy' (Gabor+MNHD)
+BIOMETRIC_ENGINE = os.environ.get("BIOMETRIC_ENGINE", "v2").lower()
+
+# EXPERIMENTAL MATCH THRESHOLD (Phase 8):
+# Derived from Stage-2 validation set EER (0.2226).
+# Marked EXPERIMENTAL: can be overridden via MATCH_THRESHOLD environment variable.
+EXPERIMENTAL_MATCH_THRESHOLD = float(os.environ.get("MATCH_THRESHOLD", "0.2226"))
+MATCH_THRESHOLD = EXPERIMENTAL_MATCH_THRESHOLD
 
 # Enrollment Validation Bounds & Consistency
 ENROLL_CONSISTENCY_THRESHOLD = 0.35

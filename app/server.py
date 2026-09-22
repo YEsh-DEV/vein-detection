@@ -49,6 +49,7 @@ try:
         LOGS_DIR, SCAN_DIAGNOSTICS_LOG,
         MATCH_THRESHOLD, ENROLL_CONSISTENCY_THRESHOLD,
         ENROLL_SAMPLE_MIN, ENROLL_SAMPLE_MAX, ENROLLMENT_CACHE_TTL,
+        BIOMETRIC_ENGINE, DEBUG_DIAGNOSTICS_MODE, DEBUG_FRAMES_DIR,
     )
     from app.db_manager import (
         init_db, enroll_user, user_exists, list_users,
@@ -58,8 +59,10 @@ try:
     from app.search_engine import SearchEngine
     from app.mediapipe_img import (
         build_landmarker, detect_hand_landmarks,
+        detect_hand_landmarks_with_diagnostics,
         extract_valleys_from_landmarks, segment_hand,
         extract_ma2017_scaled_roi, enhance_roi_vessels,
+        compute_roi_quality, draw_landmarks_overlay,
     )
     from app.cnn_extractor import extract_embedding, MODEL_LOADED
 except ImportError:
@@ -68,6 +71,7 @@ except ImportError:
         LOGS_DIR, SCAN_DIAGNOSTICS_LOG,
         MATCH_THRESHOLD, ENROLL_CONSISTENCY_THRESHOLD,
         ENROLL_SAMPLE_MIN, ENROLL_SAMPLE_MAX, ENROLLMENT_CACHE_TTL,
+        BIOMETRIC_ENGINE, DEBUG_DIAGNOSTICS_MODE, DEBUG_FRAMES_DIR,
     )
     from db_manager import (
         init_db, enroll_user, user_exists, list_users,
@@ -77,8 +81,10 @@ except ImportError:
     from search_engine import SearchEngine
     from mediapipe_img import (
         build_landmarker, detect_hand_landmarks,
+        detect_hand_landmarks_with_diagnostics,
         extract_valleys_from_landmarks, segment_hand,
         extract_ma2017_scaled_roi, enhance_roi_vessels,
+        compute_roi_quality, draw_landmarks_overlay,
     )
     from cnn_extractor import extract_embedding, MODEL_LOADED
 
@@ -98,6 +104,7 @@ landmarker = None
 picam2 = None
 cv_cap = None
 CAMERA_AVAILABLE = False
+_debug_diagnostics_mode = DEBUG_DIAGNOSTICS_MODE
 CAMERA_TYPE = None
 CAMERA_DEVICE = None
 CAMERA_ERROR_DETAIL = ""
@@ -276,12 +283,23 @@ class StatusResponse(BaseModel):
     enrolled_users_count: int
     total_templates: int
     match_threshold: float
+    biometric_engine: Optional[str] = "v2"
 
 
 class ReportResponse(BaseModel):
     users: List[dict]
     total_templates: int
     cross_match_summary: Optional[dict] = None
+
+
+class DebugModeReq(BaseModel):
+    enabled: bool
+
+
+class DebugModeResponse(BaseModel):
+    enabled: bool
+    frames_dir: str
+    message: str
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +371,18 @@ def process_image_with_timing(gray: np.ndarray):
     clahe_roi = enhance_roi_vessels(roi_224)
     t_roi_ms = round((time.time() - t_roi0) * 1000, 2)
 
+    # Diagnostic frame export if debug mode is active (Phase A4)
+    if _debug_diagnostics_mode:
+        try:
+            os.makedirs(DEBUG_FRAMES_DIR, exist_ok=True)
+            ts = int(time.time() * 1000)
+            cv2.imwrite(os.path.join(DEBUG_FRAMES_DIR, f"{ts}_raw.png"), gray)
+            overlay = draw_landmarks_overlay(stretched, landmarks, pv1, pv2)
+            cv2.imwrite(os.path.join(DEBUG_FRAMES_DIR, f"{ts}_landmarks.png"), overlay)
+            cv2.imwrite(os.path.join(DEBUG_FRAMES_DIR, f"{ts}_roi.png"), clahe_roi)
+        except Exception as e:
+            print(f"[!] Warning: Failed to save debug frames: {e}")
+
     t_cnn0 = time.time()
     embedding = extract_embedding(clahe_roi)
     t_cnn_ms = round((time.time() - t_cnn0) * 1000, 2)
@@ -369,6 +399,52 @@ def process_image(gray: np.ndarray):
     """Backward-compatible wrapper returning (clahe_roi, embedding)."""
     clahe_roi, embedding, _ = process_image_with_timing(gray)
     return clahe_roi, embedding
+
+
+def process_enrollment_sample(gray: np.ndarray):
+    """
+    Extracts CLAHE ROI and AMPVNet embedding with Phase 3 Enrollment Quality Gate checks:
+      1. Valid landmarks & knuckle valleys
+      2. Boundary padding <= 25.0%
+      3. Valid 224x224 dimensions
+      4. Contrast std >= 10.0
+      5. Embedding L2 norm == 1.0 +- 1e-3
+    Raises ValueError with actionable user guidance if quality check fails.
+    """
+    stretched = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
+    diag_res = detect_hand_landmarks_with_diagnostics(stretched, landmarker)
+    if not diag_res["success"]:
+        raise ValueError(diag_res["instruction"])
+
+    landmarks = diag_res["landmarks"]
+    pv1, pv2 = extract_valleys_from_landmarks(landmarks)
+    if pv1 is None or pv2 is None:
+        raise ValueError("Cannot detect finger valleys. Spread fingers slightly and hold palm flat.")
+
+    hand_mask = segment_hand(stretched)
+    roi_224, bbox, _ = extract_ma2017_scaled_roi(
+        stretched, pv1, pv2, hand_mask,
+        target_size=224, scale_factor=1.6, offset_factor=0.35,
+        landmarks_px=landmarks
+    )
+    if roi_224 is None or roi_224.size == 0:
+        raise ValueError("Failed to extract palm ROI bounding box.")
+
+    # Phase 3 Quality Gate
+    quality = compute_roi_quality(roi_224, bbox, stretched.shape)
+    if not quality["is_valid"]:
+        reasons_str = "; ".join(quality["reasons"])
+        raise ValueError(f"Quality gate rejected sample: {reasons_str}. Please reposition palm.")
+
+    clahe_roi = enhance_roi_vessels(roi_224)
+    embedding = extract_embedding(clahe_roi)
+
+    # Embedding L2 norm check
+    norm_val = float(np.linalg.norm(embedding))
+    if abs(norm_val - 1.0) > 1e-3:
+        raise ValueError(f"Degenerate embedding norm ({norm_val:.4f} != 1.0). Please re-capture.")
+
+    return clahe_roi, embedding, quality
 
 
 def prune_scan_captures(max_count: int = 200, max_age_seconds: int = 48 * 3600):
@@ -451,10 +527,13 @@ def log_scan_diagnostic(
 
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "operation": "scan",
+            "engine": BIOMETRIC_ENGINE,
             "capture_file": cap_rel,
             "roi_file": roi_rel,
             "decision": "ACCEPTED" if search_diag.get("accepted") else "REJECTED",
             "matched_user": search_diag.get("username"),
+            "matched_user_id": search_diag.get("user_id"),
             "score": search_diag.get("score"),
             "threshold": search_diag.get("threshold", MATCH_THRESHOLD),
             "ranked_candidates": search_diag.get("ranked_candidates", []),
@@ -470,6 +549,18 @@ def log_scan_diagnostic(
 # ---------------------------------------------------------------------------
 # API Endpoints
 # ---------------------------------------------------------------------------
+@app.get("/health")
+@app.get("/api/health")
+def health_check():
+    """Simple system health and engine readiness endpoint."""
+    return {
+        "status": "healthy",
+        "engine": BIOMETRIC_ENGINE,
+        "model_loaded": (landmarker is not None and MODEL_LOADED),
+        "camera_available": CAMERA_AVAILABLE,
+    }
+
+
 def generate_video_stream():
     """Generates MJPEG multipart streaming response."""
     while True:
@@ -493,7 +584,6 @@ def generate_video_stream():
                     frame = None
 
         if frame is None:
-            time.sleep(0.05)
             continue
 
         ret, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
@@ -527,6 +617,7 @@ async def get_status():
         "enrolled_users_count": len(users),
         "total_templates": len(emb_data["template_ids"]),
         "match_threshold": float(MATCH_THRESHOLD),
+        "biometric_engine": BIOMETRIC_ENGINE,
     }
 
 
@@ -592,7 +683,13 @@ async def scan_palm():
     accepted = search_diag["accepted"]
 
     # Pass resolved winning user_id when accepted=True
-    await run_in_threadpool(log_access, user_id=user_id if accepted else None, score=score, accepted=accepted)
+    await run_in_threadpool(
+        log_access,
+        user_id=user_id if accepted else None,
+        score=score,
+        accepted=accepted,
+        engine=BIOMETRIC_ENGINE
+    )
     cap_path, roi_path = await run_in_threadpool(save_capture_to_disk, gray, clahe_roi, username or "unknown", "scan")
 
     # Stage Latency Breakdown (Capture, Landmark, ROI, CNN Embedding, Matching, Total)
@@ -664,8 +761,8 @@ async def enroll_sample(req: SampleReq):
         raise HTTPException(status_code=503, detail=str(e))
 
     try:
-        clahe_roi, embedding = await asyncio.wait_for(
-            run_in_threadpool(process_image, gray),
+        clahe_roi, embedding, quality = await asyncio.wait_for(
+            run_in_threadpool(process_enrollment_sample, gray),
             timeout=15.0
         )
     except asyncio.TimeoutError:
@@ -676,7 +773,7 @@ async def enroll_sample(req: SampleReq):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Extraction error: {e}")
+        raise HTTPException(status_code=400, detail=f"Quality check error: {e}")
 
     current_samples.append(embedding)
     sample_idx = len(current_samples)
@@ -767,6 +864,41 @@ async def remove_user(username: str):
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Delete error: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Debug & Diagnostic Mode Endpoints (Phase A4)
+# ---------------------------------------------------------------------------
+@app.get("/api/debug/mode", response_model=DebugModeResponse)
+def get_debug_mode():
+    return {
+        "enabled": _debug_diagnostics_mode,
+        "frames_dir": str(DEBUG_FRAMES_DIR),
+        "message": f"Debug mode is {'enabled' if _debug_diagnostics_mode else 'disabled'}"
+    }
+
+
+@app.post("/api/debug/mode", response_model=DebugModeResponse)
+def set_debug_mode(req: DebugModeReq):
+    global _debug_diagnostics_mode
+    _debug_diagnostics_mode = req.enabled
+    return {
+        "enabled": _debug_diagnostics_mode,
+        "frames_dir": str(DEBUG_FRAMES_DIR),
+        "message": f"Debug mode {'enabled' if _debug_diagnostics_mode else 'disabled'}"
+    }
+
+
+@app.delete("/api/debug/frames")
+def clear_debug_frames():
+    deleted_count = 0
+    if os.path.exists(DEBUG_FRAMES_DIR):
+        for f in os.listdir(DEBUG_FRAMES_DIR):
+            fp = os.path.join(DEBUG_FRAMES_DIR, f)
+            if os.path.isfile(fp):
+                os.remove(fp)
+                deleted_count += 1
+    return {"success": True, "deleted_count": deleted_count, "message": "Debug frames directory cleared."}
 
 
 # ---------------------------------------------------------------------------

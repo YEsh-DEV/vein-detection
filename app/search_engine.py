@@ -12,10 +12,10 @@ from typing import Optional, Tuple, List, Dict
 import numpy as np
 
 try:
-    from app.constants import MATCH_THRESHOLD, EMBEDDING_DIM
+    from app.constants import MATCH_THRESHOLD, EMBEDDING_DIM, BIOMETRIC_ENGINE
     from app.db_manager import get_all_embeddings, get_username
 except ImportError:
-    from constants import MATCH_THRESHOLD, EMBEDDING_DIM
+    from constants import MATCH_THRESHOLD, EMBEDDING_DIM, BIOMETRIC_ENGINE
     from db_manager import get_all_embeddings, get_username
 
 
@@ -23,9 +23,11 @@ class SearchEngine:
     """
     In-memory fast cosine search engine for AMPVNet biometric templates.
     Caches all enrolled templates in a contiguous 2D float32 numpy matrix.
+    Supports multi-template enrollments with MAX aggregation per identity.
     """
 
-    def __init__(self):
+    def __init__(self, engine_version: str = "v2"):
+        self.engine_version = engine_version
         self._embedding_matrix: np.ndarray = np.zeros((0, EMBEDDING_DIM), dtype=np.float32)
         self._template_ids: List[int] = []
         self._user_ids: List[int] = []
@@ -34,15 +36,15 @@ class SearchEngine:
 
     def refresh_cache(self):
         """Reload all embeddings from DB into a contiguous in-RAM matrix."""
-        data = get_all_embeddings()
+        data = get_all_embeddings(engine_version=self.engine_version)
         if len(data['template_ids']) == 0:
             self._embedding_matrix = np.zeros((0, EMBEDDING_DIM), dtype=np.float32)
             self._template_ids = []
             self._user_ids = []
             return
 
-        # Ensure lockstep ordering
-        self._embedding_matrix = data['matrix'].astype(np.float32)
+        # Ensure contiguous memory layout and lockstep ordering
+        self._embedding_matrix = np.ascontiguousarray(data['matrix'], dtype=np.float32)
         self._template_ids = list(data['template_ids'])
         self._user_ids = list(data['user_ids'])
 
@@ -70,7 +72,8 @@ class SearchEngine:
             'score': -1.0,
             'user_id': None,
             'accepted': False,
-            'threshold': MATCH_THRESHOLD,
+            'threshold': self.MATCH_THRESHOLD,
+            'engine': self.engine_version,
             'ranked_candidates': [],
             't_match_ms': 0.0,
         }
@@ -80,8 +83,11 @@ class SearchEngine:
 
         t0 = time.time()
 
-        # Flatten probe embedding defensively to (512,)
+        # Flatten probe embedding defensively to (512,) and ensure unit norm
         probe = probe_embedding.reshape(-1).astype(np.float32)
+        norm = float(np.linalg.norm(probe))
+        if norm > 1e-8:
+            probe = (probe / norm).astype(np.float32)
 
         # Single BLAS matrix-vector product: shape (N_templates,)
         similarities = self._embedding_matrix @ probe
@@ -118,9 +124,8 @@ class SearchEngine:
         best_user_id = max(user_best_score, key=user_best_score.get)
         best_score = float(user_best_score[best_user_id])
 
-        # Decision rule: ACCEPT if best_score >= MATCH_THRESHOLD else REJECT
-        # Greater-than-or-equal indicates acceptance (higher cosine similarity = more confident match)
-        accepted = (best_score >= MATCH_THRESHOLD)
+        # Decision rule: ACCEPT if best_score >= self.MATCH_THRESHOLD else REJECT
+        accepted = (best_score >= self.MATCH_THRESHOLD)
 
         winner_username = None
         if accepted:
@@ -134,7 +139,8 @@ class SearchEngine:
             'score': round(best_score, 4),
             'user_id': best_user_id if accepted else None,
             'accepted': accepted,
-            'threshold': MATCH_THRESHOLD,
+            'threshold': self.MATCH_THRESHOLD,
+            'engine': self.engine_version,
             'ranked_candidates': ranked_candidates,
             't_match_ms': t_match_ms,
         }

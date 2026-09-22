@@ -17,8 +17,9 @@ a saved checkpoint (.pt).
 import sys
 import os
 import argparse
+import json
 from pathlib import Path
-from typing import Dict, Tuple, List, Optional
+from typing import Dict, Tuple, List, Optional, Any
 import random
 import numpy as np
 
@@ -69,10 +70,11 @@ def form_balanced_pairs(
     embeddings: np.ndarray,
     labels: np.ndarray,
     seed: int = 42,
+    max_impostors: Optional[int] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Forms balanced genuine pairs (same subject) and impostor pairs (different subjects)
-    per Luo et al. Section V-A.
+    Forms genuine pairs (same subject) and impostor pairs (different subjects)
+    using vectorized matrix multiplication for speed and accuracy.
 
     Returns:
         genuine_scores: 1D array of cosine similarities for intra-class pairs.
@@ -80,47 +82,47 @@ def form_balanced_pairs(
     """
     n_samples = len(labels)
     if n_samples < 2:
-        return np.array([1.0]), np.array([0.0])
+        return np.array([1.0], dtype=np.float32), np.array([0.0], dtype=np.float32)
 
-    genuine_scores = []
-    impostor_candidates = []
+    # Cosine similarity matrix via dot product (embeddings are unit L2-norm)
+    sim_matrix = np.dot(embeddings, embeddings.T)
+    # Extract upper triangular indices (excluding diagonal self-comparisons)
+    i_upper, j_upper = np.triu_indices(n_samples, k=1)
+    pair_sims = sim_matrix[i_upper, j_upper]
+    is_same = (labels[i_upper] == labels[j_upper])
 
-    # Collect all possible pairs
-    for i in range(n_samples):
-        for j in range(i + 1, n_samples):
-            # Cosine similarity is dot product since embeddings are L2-normalized
-            cos_sim = float(np.dot(embeddings[i], embeddings[j]))
-            if labels[i] == labels[j]:
-                genuine_scores.append(cos_sim)
-            else:
-                impostor_candidates.append(cos_sim)
+    genuine_scores = pair_sims[is_same]
+    impostor_candidates = pair_sims[~is_same]
 
-    if not genuine_scores:
-        # Fallback if every sample has unique identity
-        genuine_scores = [1.0]
+    if len(genuine_scores) == 0:
+        genuine_scores = np.array([1.0], dtype=np.float32)
 
-    n_genuine = len(genuine_scores)
+    n_gen = len(genuine_scores)
     rng = random.Random(seed)
 
-    # Balance impostor pairs to equal count of genuine pairs (Section V-A)
-    if len(impostor_candidates) > n_genuine:
-        impostor_scores = rng.sample(impostor_candidates, n_genuine)
+    # Balance impostor pairs to match genuine pairs (or max_impostors)
+    target_imp = n_gen if max_impostors is None else min(max_impostors, len(impostor_candidates))
+    if len(impostor_candidates) > target_imp:
+        indices = rng.sample(range(len(impostor_candidates)), target_imp)
+        impostor_scores = impostor_candidates[indices]
     else:
-        impostor_scores = impostor_candidates if impostor_candidates else [0.0]
+        impostor_scores = impostor_candidates if len(impostor_candidates) > 0 else np.array([0.0], dtype=np.float32)
 
-    return np.array(genuine_scores, dtype=np.float32), np.array(impostor_scores, dtype=np.float32)
+    return genuine_scores.astype(np.float32), impostor_scores.astype(np.float32)
 
 
 def compute_eer_and_tar(
     genuine_scores: np.ndarray,
     impostor_scores: np.ndarray,
     num_thresholds: int = 2000,
-) -> Dict[str, float]:
+) -> Dict[str, Any]:
     """
     Sweeps decision threshold across [-1.0, 1.0] to compute:
       - EER (Equal Error Rate where FAR == FRR)
       - EER threshold
       - TAR @ FAR = 0.01 (1% FAR)
+      - Decidability Index (d-prime)
+      - Score distributions (mean, std)
     """
     thresholds = np.linspace(-1.0, 1.0, num_thresholds)
     n_gen = len(genuine_scores)
@@ -131,14 +133,10 @@ def compute_eer_and_tar(
     tar_list = []
 
     for thresh in thresholds:
-        # False Accept: impostor score >= threshold
         fa = np.sum(impostor_scores >= thresh)
         far = fa / max(1, n_imp)
-
-        # False Reject: genuine score < threshold
         fr = np.sum(genuine_scores < thresh)
         frr = fr / max(1, n_gen)
-
         tar = 1.0 - frr
 
         far_list.append(far)
@@ -149,22 +147,29 @@ def compute_eer_and_tar(
     frr_arr = np.array(frr_list)
     tar_arr = np.array(tar_list)
 
-    # Equal Error Rate: point where |FAR - FRR| is minimal
-    eer_idx = np.argmin(np.abs(far_arr - frr_arr))
+    # Equal Error Rate
+    diff = np.abs(far_arr - frr_arr)
+    eer_idx = np.argmin(diff)
     eer = float((far_arr[eer_idx] + frr_arr[eer_idx]) / 2.0)
     eer_thresh = float(thresholds[eer_idx])
 
     # TAR @ FAR <= 0.01
-    # Filter thresholds where FAR <= 0.01
     valid_far_indices = np.where(far_arr <= 0.01)[0]
     if len(valid_far_indices) > 0:
-        # Pick the lowest threshold that still satisfies FAR <= 0.01 (maximizes TAR)
         idx_far01 = valid_far_indices[0]
         tar_at_far01 = float(tar_arr[idx_far01])
         thresh_at_far01 = float(thresholds[idx_far01])
     else:
         tar_at_far01 = 0.0
         thresh_at_far01 = 1.0
+
+    # Decidability Index d'
+    gen_mean = float(np.mean(genuine_scores))
+    gen_std = float(np.std(genuine_scores))
+    imp_mean = float(np.mean(impostor_scores))
+    imp_std = float(np.std(impostor_scores))
+    pooled_var = 0.5 * (gen_std ** 2 + imp_std ** 2)
+    d_prime = (gen_mean - imp_mean) / (np.sqrt(pooled_var) + 1e-8) if pooled_var > 0 else 0.0
 
     return {
         "eer": eer,
@@ -175,6 +180,11 @@ def compute_eer_and_tar(
         "thresh_at_far_01": thresh_at_far01,
         "num_genuine": n_gen,
         "num_impostor": n_imp,
+        "gen_mean": gen_mean,
+        "gen_std": gen_std,
+        "imp_mean": imp_mean,
+        "imp_std": imp_std,
+        "d_prime": float(d_prime),
     }
 
 
@@ -200,7 +210,8 @@ def main():
                         help="Path to validation data directory")
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size")
     parser.add_argument("--split_ratio", type=float, default=0.5, help="Subject split ratio")
-    parser.add_argument("--device", type=str, default="cpu", help="Compute device (cuda or cpu)")
+    parser.add_argument("--split", type=str, default="val", help="Split name ('val', 'test', 'all')")
+    parser.add_argument("--report_json", type=str, default=None, help="Optional output JSON path for evaluation metrics")
     args = parser.parse_args()
 
     device = torch.device(args.device if torch.cuda.is_available() and args.device == "cuda" else "cpu")
@@ -220,22 +231,33 @@ def main():
     # Load Dataset
     val_dataset = PalmVeinDataset(
         data_dir=args.data_dir,
-        split="val",
+        split=args.split,
         split_ratio=args.split_ratio,
+        is_train=False,
     )
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
-    print(f"[eval.py] Loaded {len(val_dataset)} validation samples across {val_dataset.num_classes} subjects.")
+    print(f"[eval.py] Loaded {len(val_dataset)} evaluation samples across {val_dataset.num_classes} classes.")
 
     metrics = evaluate_model(model, val_loader, device)
 
-    print("\n" + "=" * 50)
+    print("\n" + "=" * 65)
     print("BIOMETRIC VERIFICATION PERFORMANCE REPORT")
-    print("=" * 50)
-    print(f"Genuine Pairs Evaluated  : {metrics['num_genuine']}")
-    print(f"Impostor Pairs Evaluated : {metrics['num_impostor']}")
-    print(f"Equal Error Rate (EER)   : {metrics['eer_percent']:.2f}% (thresh = {metrics['threshold']:.4f})")
-    print(f"TAR @ FAR = 0.01 (1%)    : {metrics['tar_at_far_01_percent']:.2f}% (thresh = {metrics['thresh_at_far_01']:.4f})")
-    print("=" * 50 + "\n")
+    print("=" * 65)
+    print(f"Genuine Pairs Evaluated  : {metrics['num_genuine']:,}")
+    print(f"Impostor Pairs Evaluated : {metrics['num_impostor']:,}")
+    print(f"Equal Error Rate (EER)   : {metrics['eer_percent']:.2f}% (threshold = {metrics['threshold']:.4f})")
+    print(f"TAR @ FAR = 0.01 (1%)    : {metrics['tar_at_far_01_percent']:.2f}% (threshold = {metrics['thresh_at_far_01']:.4f})")
+    print(f"Decidability Index (d')  : {metrics['d_prime']:.4f}")
+    print(f"Genuine Similarity       : mean = {metrics['gen_mean']:.4f}, std = {metrics['gen_std']:.4f}")
+    print(f"Impostor Similarity      : mean = {metrics['imp_mean']:.4f}, std = {metrics['imp_std']:.4f}")
+    print("=" * 65 + "\n")
+
+    if args.report_json:
+        out_p = Path(args.report_json)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_p, "w", encoding="utf-8") as f:
+            json.dump(metrics, f, indent=2)
+        print(f"[eval.py] Saved evaluation report to: {out_p}")
 
 
 if __name__ == "__main__":

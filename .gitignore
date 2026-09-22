@@ -15,21 +15,25 @@ venv/
 env/
 .env
 
-# ── Biometric data (NEVER commit real templates or personal palm images) ───────
+# ── Biometric data & Datasets (NEVER commit real templates or personal palm images) ───────
 data/
 captures/
 roi_clahe/
 dataset/
 database/
 sample dataset/
+training/data_processed/
+training/checkpoints/
+training/logs/
 *.db
 *.db-shm
 *.db-wal
 logs/*.jsonl
 !logs/.gitkeep
 
-# ── MediaPipe model (large binary — download separately) ──────────────────────
+# ── MediaPipe model (large binary — auto-downloaded by ensure_model_exists) ────
 hand_landmarker.task
+models/hand_landmarker.task
 
 # ── Test/sample images ────────────────────────────────────────────────────────
 *.bmp
@@ -52,7 +56,5 @@ node_modules/
 web/node_modules/
 web/dist/
 
-# ── Internal Documentation & Research ─────────────────────────────────────────
-agent_report.md
-system_architecture.md
+# ── Binary Research Documents ─────────────────────────────────────────────────
 *.pdf

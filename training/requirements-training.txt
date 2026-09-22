@@ -20,6 +20,7 @@ torchvision>=0.16.0        # DataLoader, transforms (RandomPerspective, ToTensor
 # ---- Computer Vision ----
 opencv-python>=4.10.0      # Image loading, ROI preprocessing, CLAHE
 Pillow>=10.0.0             # PIL Image for torchvision transforms
+mediapipe>=0.10.14,<1.0.0  # 21-joint skeletal tracking & knuckle valley extraction
 
 # ---- Scientific Computing ----
 numpy>=1.26.0              # Array operations in evaluation and dataset loading

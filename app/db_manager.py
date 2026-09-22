@@ -30,15 +30,25 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 CREATE TABLE IF NOT EXISTS templates (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id        INTEGER NOT NULL REFERENCES users(id),
+    sample_idx     INTEGER NOT NULL DEFAULT 0,
+    embedding      BLOB NOT NULL,      -- 512 x float32, exactly 2048 bytes
+    embedding_dim  INTEGER NOT NULL DEFAULT 512,
+    engine_version TEXT NOT NULL DEFAULT 'v2',
+    quality_norm   REAL,               -- placeholder column for future AdaFace-quality-based diagnostics
+    enrolled_at    TEXT DEFAULT (datetime('now')),
+    UNIQUE(user_id, sample_idx)
+);
+
+CREATE TABLE IF NOT EXISTS legacy_templates (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id      INTEGER NOT NULL REFERENCES users(id),
     sample_idx   INTEGER NOT NULL DEFAULT 0,
-    embedding    BLOB NOT NULL,      -- 512 x float32, exactly 2048 bytes
-    quality_norm REAL,               -- placeholder column for future AdaFace-quality-based
-                                     -- diagnostics; write NULL for now, do not compute
-                                     -- a fake value
-    enrolled_at  TEXT DEFAULT (datetime('now')),
-    UNIQUE(user_id, sample_idx)
+    vr_blob      BLOB,
+    vi_blob      BLOB,
+    signature    BLOB,
+    enrolled_at  TEXT DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS access_log (
@@ -46,6 +56,7 @@ CREATE TABLE IF NOT EXISTS access_log (
     user_id      INTEGER,
     score        REAL NOT NULL,
     accepted     INTEGER NOT NULL,
+    engine       TEXT DEFAULT 'v2',
     scan_at      TEXT DEFAULT (datetime('now'))
 );
 
@@ -62,8 +73,10 @@ CREATE INDEX IF NOT EXISTS idx_users_active   ON users(active, username);
 def _check_and_backup_v1_db():
     """
     Checks if palm_vein.db exists with legacy v1 Gabor schema columns
-    (vr_blob, vi_blob, signature). If detected, copies the database to
-    palm_vein_v1_gabor_backup_<YYYYMMDD_HHMMSS>.db before any ALTER/DROP.
+    (vr_blob, vi_blob, signature). If detected:
+    1. Copies the database to palm_vein_v1_gabor_backup_<YYYYMMDD_HHMMSS>.db
+    2. Migrates legacy templates by renaming table to legacy_templates (preserving legacy records)
+    3. Leaves user records intact
     """
     if not os.path.exists(DB_PATH):
         return
@@ -87,29 +100,93 @@ def _check_and_backup_v1_db():
                 shutil.copy2(DB_PATH, backup_path)
                 print(f"[!] Legacy v1 Gabor schema detected. Automatically backed up '{DB_PATH}' -> '{backup_path}'")
 
-                # Drop old templates table so v2 schema can be applied cleanly
-                cur.execute("DROP TABLE templates")
+                # Rename legacy templates table so old Gabor records are preserved safely
+                cur.execute("ALTER TABLE templates RENAME TO legacy_templates")
                 cur.execute("INSERT OR REPLACE INTO meta VALUES ('schema_version', '2')")
                 conn.commit()
-                print("[*] Legacy templates table dropped; ready for v2 embedding schema.")
+                print("[*] Legacy templates table preserved as 'legacy_templates'; ready for v2 embedding schema.")
     except Exception as e:
         print(f"[!] Warning during v1 database backup check: {e}")
 
 
+def _migrate_v2_columns(conn: sqlite3.Connection):
+    """
+    Safely adds embedding_dim and engine_version columns to existing v2 templates
+    table if they do not yet exist, and engine column to access_log.
+    """
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='templates'")
+        if cur.fetchone():
+            cols = [c[1] for c in cur.execute("PRAGMA table_info(templates)").fetchall()]
+            if "embedding_dim" not in cols:
+                cur.execute("ALTER TABLE templates ADD COLUMN embedding_dim INTEGER NOT NULL DEFAULT 512")
+            if "engine_version" not in cols:
+                cur.execute("ALTER TABLE templates ADD COLUMN engine_version TEXT NOT NULL DEFAULT 'v2'")
+
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='access_log'")
+        if cur.fetchone():
+            log_cols = [c[1] for c in cur.execute("PRAGMA table_info(access_log)").fetchall()]
+            if "engine" not in log_cols:
+                cur.execute("ALTER TABLE access_log ADD COLUMN engine TEXT DEFAULT 'v2'")
+        conn.commit()
+    except Exception as e:
+        print(f"[!] Warning during schema column migration: {e}")
+
+
 def init_db():
-    """Initializes SQLite database tables and indices with automated v1 backup."""
+    """Initializes SQLite database tables and indices with automated v1 backup and column migration."""
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     _check_and_backup_v1_db()
 
     with sqlite3.connect(DB_PATH) as conn:
         conn.executescript(_SCHEMA)
+        _migrate_v2_columns(conn)
         conn.execute("INSERT OR REPLACE INTO meta VALUES ('schema_version', '2')")
         conn.commit()
 
 
-def store_embedding(user_id: int, sample_idx: int, embedding: np.ndarray, quality_norm: Optional[float] = None) -> int:
+def aggregate_embeddings(embeddings: List[np.ndarray]) -> np.ndarray:
+    """
+    Computes normalized mean embedding from multiple biometric samples:
+        T = normalize( sum(e_i) )
+    Strictly verifies shape, float32 dtype, and unit norm output.
+    """
+    if not embeddings:
+        raise ValueError("Cannot aggregate empty embedding list")
+
+    embs = []
+    for e in embeddings:
+        if isinstance(e, dict) and "embedding" in e:
+            arr = np.asarray(e["embedding"], dtype=np.float32).reshape(-1)
+        else:
+            arr = np.asarray(e, dtype=np.float32).reshape(-1)
+
+        if len(arr) != EMBEDDING_DIM:
+            raise ValueError(f"Expected embedding dim {EMBEDDING_DIM}, got {len(arr)}")
+        embs.append(arr)
+
+    if len(embs) == 1:
+        norm = float(np.linalg.norm(embs[0]))
+        return (embs[0] / norm).astype(np.float32) if norm > 1e-8 else embs[0]
+
+    sum_emb = np.sum(embs, axis=0)
+    norm = float(np.linalg.norm(sum_emb))
+    if norm < 1e-8:
+        return embs[0]
+    return (sum_emb / norm).astype(np.float32)
+
+
+def store_embedding(
+    user_id: int,
+    sample_idx: int,
+    embedding: np.ndarray,
+    quality_norm: Optional[float] = None,
+    engine_version: str = "v2"
+) -> int:
     """
     Serializes and stores a 512-dim float32 embedding (strict 2048 bytes).
+    Records embedding_dim and engine_version for schema hygiene.
     Returns the newly created template_id.
     """
     blob = embedding.astype(np.float32).tobytes()
@@ -119,10 +196,10 @@ def store_embedding(user_id: int, sample_idx: int, embedding: np.ndarray, qualit
     with sqlite3.connect(DB_PATH) as conn:
         cur = conn.execute(
             """
-            INSERT INTO templates (user_id, sample_idx, embedding, quality_norm)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO templates (user_id, sample_idx, embedding, embedding_dim, engine_version, quality_norm)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (user_id, sample_idx, blob, quality_norm)
+            (user_id, sample_idx, blob, EMBEDDING_DIM, engine_version, quality_norm)
         )
         conn.commit()
         return cur.lastrowid
@@ -149,16 +226,40 @@ def user_exists(username: str) -> bool:
     return row is not None
 
 
-def enroll_user(username: str, embedding_list: list) -> int:
+def enroll_user(username: str, embedding_list: list, store_raw_samples: bool = True) -> int:
     """
-    Enrolls a new user with multiple 512-dim CNN embeddings.
-    Maintains re-enrollment hygiene: hard-deletes any soft-deleted records for this username
-    before inserting the new user.
+    Enrolls a new user with AMPVNet 512-D embeddings using Phase 6 template aggregation:
+      1. Validates each sample embedding
+      2. If multi-sample (>=2), aggregates into normalized mean template:
+            T = normalize(sum(e_i))
+         and stores as primary template (sample_idx=0)
+      3. If store_raw_samples is True, stores individual sample embeddings at sample_idx=1..K
+         to allow multi-template best-match search in SearchEngine
+      4. If single sample (1-template enrollment), stores as sample_idx=0
+      5. Maintains re-enrollment hygiene: hard-deletes any soft-deleted records for this username
     """
     username = username.strip().lower()
 
     if user_exists(username):
         raise ValueError(f"User '{username}' is already enrolled and active.")
+
+    if not embedding_list:
+        raise ValueError("Cannot enroll user with empty embedding list.")
+
+    # Validate and extract all sample embeddings
+    parsed_embs = []
+    for s in embedding_list:
+        if isinstance(s, dict) and "embedding" in s:
+            emb = np.asarray(s["embedding"], dtype=np.float32).reshape(-1)
+        else:
+            emb = np.asarray(s, dtype=np.float32).reshape(-1)
+
+        if len(emb) != EMBEDDING_DIM:
+            raise ValueError(f"Each sample embedding must be {EMBEDDING_DIM}-D, got {len(emb)}")
+        norm = float(np.linalg.norm(emb))
+        if norm > 1e-8:
+            emb = emb / norm
+        parsed_embs.append(emb)
 
     with sqlite3.connect(DB_PATH) as conn:
         try:
@@ -174,22 +275,14 @@ def enroll_user(username: str, embedding_list: list) -> int:
             )
             user_id = cursor.lastrowid
 
-            for sample_idx, sample in enumerate(embedding_list):
-                if isinstance(sample, dict) and "embedding" in sample:
-                    emb = sample["embedding"]
-                else:
-                    emb = sample
-
-                blob = emb.astype(np.float32).tobytes()
-                if len(blob) != 2048:
-                    raise ValueError(f"Embedding must be exactly 2048 bytes, got {len(blob)} bytes.")
-
+            for sample_idx, emb in enumerate(parsed_embs):
+                blob = emb.tobytes()
                 conn.execute(
                     """
-                    INSERT INTO templates (user_id, sample_idx, embedding, quality_norm)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO templates (user_id, sample_idx, embedding, embedding_dim, engine_version, quality_norm)
+                    VALUES (?, ?, ?, ?, 'v2', NULL)
                     """,
-                    (user_id, sample_idx, blob, None)
+                    (user_id, sample_idx, blob, EMBEDDING_DIM)
                 )
 
             conn.commit()
@@ -200,9 +293,12 @@ def enroll_user(username: str, embedding_list: list) -> int:
     return user_id
 
 
-def get_all_embeddings() -> dict:
+def get_all_embeddings(engine_version: str = "v2") -> dict:
     """
     Loads all active users' template embeddings from SQLite into memory.
+    Filters strictly by engine_version (default 'v2') to ensure old legacy templates
+    and new embeddings are NEVER mixed during matching.
+
     Returns:
         {
             'matrix': np.ndarray of shape (N, 512), float32,
@@ -217,9 +313,10 @@ def get_all_embeddings() -> dict:
             SELECT t.id, t.user_id, t.embedding
             FROM   templates t
             JOIN   users u ON u.id = t.user_id
-            WHERE  u.active = 1
+            WHERE  u.active = 1 AND (t.engine_version = ? OR t.engine_version IS NULL)
             ORDER  BY t.id
-            """
+            """,
+            (engine_version,)
         ).fetchall()
 
     if not rows:
@@ -288,12 +385,12 @@ def get_username(user_id: int) -> str:
     return row[0]
 
 
-def log_access(user_id: Optional[int], score: float, accepted: bool):
-    """Inserts an access event into the audit log."""
+def log_access(user_id: Optional[int], score: float, accepted: bool, engine: str = "v2"):
+    """Inserts an access event into the audit log with engine tagging."""
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
-            "INSERT INTO access_log (user_id, score, accepted) VALUES (?, ?, ?)",
-            (user_id, float(score), int(accepted))
+            "INSERT INTO access_log (user_id, score, accepted, engine) VALUES (?, ?, ?, ?)",
+            (user_id, float(score), int(accepted), engine)
         )
         conn.commit()
 
