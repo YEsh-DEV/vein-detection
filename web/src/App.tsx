@@ -526,8 +526,8 @@ export default function App() {
   return (
     <div className="min-h-screen bg-dribbble-yellow flex justify-center items-center p-0 sm:p-6 text-[#121212] select-none font-sans">
       
-      {/* ── KIOSK PHONE / 5" TOUCHSCREEN CONTAINER (480px) ── */}
-      <div className="w-full max-w-[480px] min-h-screen sm:min-h-[854px] sm:h-[854px] bg-[#FFFDF0] border-x-0 sm:border-[4px] border-black sm:rounded-[36px] sm:shadow-[10px_10px_0px_#121212] flex flex-col relative overflow-hidden bg-neo-cream">
+      {/* ── KIOSK 5" RASPBERRY PI TOUCH DISPLAY 2 (720×1280 PORTRAIT) ── */}
+      <div className="w-[720px] h-[1280px] bg-[#FFFDF0] border-[4px] border-black rounded-[24px] shadow-[8px_8px_0px_#121212] flex flex-col relative overflow-hidden bg-neo-cream">
 
         {/* ── CLEAN CUSTOMER-FACING SERVICE STATUS BAR (Priority 3) ── */}
         <div className="px-5 pt-3.5 pb-2.5 flex items-center justify-between text-xs font-black text-black z-20 border-b-[2px] border-black/10">
