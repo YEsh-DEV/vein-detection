@@ -20,6 +20,8 @@ DB_PATH = os.path.join(DATA_DIR, "palm_vein.db")
 
 MODELS_DIR = os.path.join(PROJECT_ROOT, "models")
 MODEL_PATH = os.path.join(MODELS_DIR, "hand_landmarker.task")
+AMPVNET_ONNX_PATH = os.path.join(MODELS_DIR, "ampvnet.onnx")
+EMBEDDING_DIM = 512
 
 STATIC_DIR = os.path.join(PROJECT_ROOT, "web", "static")
 CAPTURE_DIR = os.path.join(PROJECT_ROOT, "captures")
@@ -37,26 +39,13 @@ os.makedirs(LOGS_DIR, exist_ok=True)
 
 
 # ---------------------------------------------------------------------------
-# Biometric Matching Thresholds & Tolerances
+# Biometric Matching Thresholds & Tolerances (v2 CNN Embedding Pipeline)
 # ---------------------------------------------------------------------------
-# MATCH_THRESHOLD: Threshold for authentic identification.
-# CALIBRATION PENDING — calibrated via empirical EER harness (0.3650 achieves FAR=0.0%, FRR=0.0%).
-MATCH_THRESHOLD = 0.3650
-
-# Layer 1 signature pre-filter threshold (Euclidean distance on 64-float (VR+VI)/2 signature)
-# Empirical calibration: genuine max=1.1004, impostor min=1.0016, mean=1.4205.
-# 1.1500 guarantees 100.0% genuine pass while filtering 93.07% of impostors in RAM.
-L1_THRESHOLD = 1.1500
-
-# Edge database bypass: if total enrolled templates <= L1_BYPASS_MAX_TEMPLATES,
-# all templates are evaluated directly in Layer 2 to avoid any risk of premature filtering.
-L1_BYPASS_MAX_TEMPLATES = 80
-TOP_K = 80
-
-# MNHD Translation and Rotation Search Parameters
-MAX_DISPLACEMENT = 8
-ANGLE_BRACKET = (-4, -2, 0, 2, 4)
-ANGLE_EARLY_EXIT = 0.35  # If 0-deg baseline score <= 0.35, bypass remaining angle evaluations
+# PLACEHOLDER — cosine similarity threshold, NOT calibrated on real data.
+# Must be set via a real FAR/FRR/EER sweep (see tools/real_data_analysis.py, which
+# needs updating for embeddings — see Step 4 below) using real enrolled users'
+# embeddings before this system is used for anything beyond internal testing.
+MATCH_THRESHOLD = 0.5
 
 # Enrollment Validation Bounds & Consistency
 ENROLL_CONSISTENCY_THRESHOLD = 0.35
@@ -70,8 +59,17 @@ SELF_MATCH_WARN_THRESHOLD = 0.35
 # In-Memory Session Management
 ENROLLMENT_CACHE_TTL = 600  # 10 minutes in seconds
 
-# Gabor Feature Extraction Hyperparameters
+
+# ─── LEGACY (Gabor+MNHD era) — unused by v2 CNN pipeline, kept only because
+# app/gabor.py still references them and we're preserving that file for reference ───
+L1_THRESHOLD = 1.1500
+L1_BYPASS_MAX_TEMPLATES = 80
+TOP_K = 80
+MAX_DISPLACEMENT = 8
+ANGLE_BRACKET = (-4, -2, 0, 2, 4)
+ANGLE_EARLY_EXIT = 0.35
 BLOCK_SIZE = 32
 ROI_SIZE = 256
 GABOR_KSIZE = 15
 ORIENTATIONS_DEG = (0, 30, 60, 90, 120, 150)
+
