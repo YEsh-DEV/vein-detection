@@ -31,6 +31,7 @@ scikit-learn>=1.3.0        # roc_curve for EER computation in evaluate.py
 
 # ---- ONNX Export & Validation ----
 onnx>=1.15.0               # ONNX graph construction and validation in export_onnx.py
+onnxscript>=0.1.0          # Required by PyTorch >=2.1 for onnx export
 onnxruntime>=1.17.0        # CPU-based ONNX inference for export validation
                            # On the Pi 5, use: pip install onnxruntime (ARM64 wheel)
 

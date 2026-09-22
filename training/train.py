@@ -2,502 +2,282 @@
 """
 training/train.py
 -----------------
-AMPVNet + AdaFace Training Script.
+Training Script for AMPVNet with AdaFace Loss on Palm Vein Biometrics.
 
-Supports two training phases as described in system_architecture.md Section 6.2:
-
-  --phase pretrain   Phase 1: Train AMPVNet from scratch on CASIA data.
-                               Uses full AdaFace margin, RPT+RGA augmentation.
-                               Produces: checkpoints/pretrain_best.pt
-
-  --phase finetune   Phase 2: Fine-tune pretrained backbone on own captured data.
-                               Loads pretrain_best.pt, freezes Stages 1-2,
-                               trains Stages 3-4 + head with lower LR.
-                               Produces: checkpoints/finetune_best.pt
-
-Usage:
-  # Phase 1 — Pretraining on CASIA (run on a machine with GPU or fast CPU)
-  python training/train.py --phase pretrain --data_root training/data_raw/casia
-
-  # Phase 2 — Fine-tuning on captured Pi data
-  python training/train.py --phase finetune --data_root training/data_raw/own \\
-      --pretrain_ckpt training/checkpoints/pretrain_best.pt
-
-Checkpoint format (all phases):
-  {
-      "epoch":        int,
-      "model_state":  OrderedDict,    (AMPVNet backbone state_dict)
-      "head_state":   OrderedDict,    (AdaFace head state_dict)
-      "optimizer":    dict,           (optimizer state_dict)
-      "scheduler":    dict,           (scheduler state_dict)
-      "best_val_acc": float,
-      "phase":        str,
-      "num_classes":  int,
-      "config":       dict,           (all CLI args as dict)
-  }
+Implements all specifications from system_architecture.md Section 7 & Luo et al. (IEEE TIFS 2024):
+  - Optimizer: Adam with momentum 0.9 (betas=(0.9, 0.999)), initial LR 0.001.
+  - Scheduler: CosineAnnealingLR with T_max=epochs and eta_min=0.0001.
+  - Augmentations: RPT (RandomPerspectiveTransform) and RGA (RandomGammaAdjustment).
+  - Loss: AdaFace loss with adaptive quality margin (Eq. 6-10).
+  - Validation: EER and TAR@FAR=0.01 evaluated every 5 epochs per Step 5 & 6.
+  - Checkpointing: Saves lowest val EER checkpoint to checkpoints/best.pt and checkpoints/final.pt.
+  - Hyperparameters: Fully configurable via CLI arguments (no hardcoding).
 """
 
 import sys
 import os
+import argparse
 import time
 import json
-import argparse
-import logging
-import datetime
 from pathlib import Path
+from typing import Dict, Any
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.optim import AdamW
+from torch.optim import Adam
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.cuda.amp import GradScaler, autocast
+from torch.utils.data import DataLoader
 
-# ---------------------------------------------------------------------------
-# Add training directory to path so local imports work regardless of cwd
-# ---------------------------------------------------------------------------
 _TRAINING_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _TRAINING_DIR)
+if _TRAINING_DIR not in sys.path:
+    sys.path.insert(0, _TRAINING_DIR)
 
 from model import AMPVNet
-from adaface_loss import AdaFace, AMPVNetWithNorm
-from augmentations import build_train_transform, build_inference_transform
-from dataset import build_casia_loaders, build_own_loaders
+from adaface_loss import AdaFace
+from dataset import PalmVeinDataset
+from eval import evaluate_model
 
 
-# ---------------------------------------------------------------------------
-# Logging setup
-# ---------------------------------------------------------------------------
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Train AMPVNet with AdaFace Loss for Palm Vein Recognition",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    # Dataset & directories
+    parser.add_argument("--data_dir", type=str, default="training/data",
+                        help="Root directory containing subject subdirectories")
+    parser.add_argument("--output_dir", type=str, default="training/checkpoints",
+                        help="Directory to save checkpoints (best.pt, final.pt)")
+    parser.add_argument("--split_ratio", type=float, default=0.5,
+                        help="Subject-independent split ratio (5:5 protocol = 0.5)")
 
-def setup_logger(log_dir: str, phase: str) -> logging.Logger:
-    """Creates a logger that writes to both stdout and a JSONL file."""
-    os.makedirs(log_dir, exist_ok=True)
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = os.path.join(log_dir, f"{phase}_{ts}.log")
+    # Training loop
+    parser.add_argument("--epochs", type=int, default=100,
+                        help="Total training epochs")
+    parser.add_argument("--batch_size", type=int, default=16,
+                        help="Batch size")
+    parser.add_argument("--learning_rate", "--lr", type=float, default=0.001,
+                        help="Initial learning rate for Adam")
+    parser.add_argument("--lr_min", type=float, default=0.0001,
+                        help="Minimum learning rate floor for CosineAnnealingLR")
+    parser.add_argument("--eval_interval", type=int, default=5,
+                        help="Evaluate EER every N epochs")
 
-    logger = logging.getLogger("ampvnet_train")
-    logger.setLevel(logging.DEBUG)
+    # Augmentations (RPT + RGA)
+    parser.add_argument("--r_rpt", type=float, default=0.4,
+                        help="Random Perspective Transform (RPT) distortion scale")
+    parser.add_argument("--p_rpt", type=float, default=0.5,
+                        help="Probability of applying RPT")
+    parser.add_argument("--gamma_rga", type=float, default=0.6,
+                        help="Random Gamma Adjustment (RGA) gamma half-range")
+    parser.add_argument("--p_rga", type=float, default=0.3,
+                        help="Probability of applying RGA")
 
-    # Console handler
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(logging.INFO)
-    ch.setFormatter(logging.Formatter("[%(asctime)s][%(levelname)s] %(message)s", "%H:%M:%S"))
+    # AdaFace loss hyperparameters
+    parser.add_argument("--adaface_m", type=float, default=0.55,
+                        help="AdaFace base margin parameter m (paper default: 0.55)")
+    parser.add_argument("--adaface_h", type=float, default=0.29,
+                        help="AdaFace quality sensitivity scale h (paper default: 0.29)")
+    parser.add_argument("--adaface_s", type=float, default=50.0,
+                        help="AdaFace feature scale factor s (paper default: 50.0)")
+    parser.add_argument("--adaface_t_alpha", type=float, default=0.99,
+                        help="AdaFace EMA momentum for batch statistics (default: 0.99)")
 
-    # File handler
-    fh = logging.FileHandler(log_path)
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(logging.Formatter("%(asctime)s\t%(levelname)s\t%(message)s"))
+    # System & execution
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--num_workers", type=int, default=2, help="DataLoader workers")
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
+                        help="Compute device (cuda or cpu)")
 
-    logger.addHandler(ch)
-    logger.addHandler(fh)
-    return logger
+    return parser.parse_args()
 
-
-# ---------------------------------------------------------------------------
-# Metric helpers
-# ---------------------------------------------------------------------------
-
-def compute_top1_accuracy(logits: torch.Tensor, labels: torch.Tensor) -> float:
-    """Computes Top-1 accuracy from logits and ground-truth labels."""
-    preds = logits.argmax(dim=1)
-    correct = (preds == labels).float().sum().item()
-    return correct / labels.size(0)
-
-
-@torch.no_grad()
-def evaluate(
-    wrapped_backbone: AMPVNetWithNorm,
-    head: AdaFace,
-    val_loader,
-    device: torch.device,
-    logger: logging.Logger,
-) -> float:
-    """
-    Runs one full validation epoch.
-
-    Returns:
-        Average top-1 accuracy across all validation batches.
-    """
-    wrapped_backbone.eval()
-    head.eval()
-
-    total_correct = 0
-    total_samples = 0
-
-    for batch_idx, (images, labels) in enumerate(val_loader):
-        images = images.to(device, non_blocking=True)
-        labels = labels.to(device, non_blocking=True)
-
-        embeddings, norms = wrapped_backbone(images)
-        logits = head(embeddings, norms, labels)
-        preds = logits.argmax(dim=1)
-        total_correct += (preds == labels).sum().item()
-        total_samples += labels.size(0)
-
-    acc = total_correct / max(total_samples, 1)
-    return acc
-
-
-# ---------------------------------------------------------------------------
-# Freeze helpers for fine-tuning phase
-# ---------------------------------------------------------------------------
-
-def _freeze_module(module: nn.Module):
-    for param in module.parameters():
-        param.requires_grad = False
-
-
-def _unfreeze_module(module: nn.Module):
-    for param in module.parameters():
-        param.requires_grad = True
-
-
-def freeze_for_finetuning(backbone: AMPVNet, logger: logging.Logger):
-    """
-    Phase 2 fine-tuning freeze strategy:
-      Freeze: stem, stage1, stage2  (coarse vascular features, large CASIA-trained)
-      Train:  stage3, stage4, gap, dropout, fc  (identity-specific fine details)
-
-    Rationale: stem + stage1/2 learn generalizable NIR vein edge filters from CASIA.
-    stage3/4 learn identity-discriminative features — these need adaptation to
-    deployment-domain lighting and palm geometry.
-    """
-    _freeze_module(backbone.stem)
-    _freeze_module(backbone.stage1)
-    _freeze_module(backbone.stage2)
-    _unfreeze_module(backbone.stage3)
-    _unfreeze_module(backbone.stage4)
-    _unfreeze_module(backbone.fc)
-
-    frozen_params   = sum(p.numel() for p in backbone.parameters() if not p.requires_grad)
-    trainable_params = sum(p.numel() for p in backbone.parameters() if p.requires_grad)
-    logger.info(f"[Freeze] stem + stage1 + stage2 frozen ({frozen_params:,} params).")
-    logger.info(f"[Freeze] stage3 + stage4 + fc trainable ({trainable_params:,} params).")
-
-
-# ---------------------------------------------------------------------------
-# Training epoch
-# ---------------------------------------------------------------------------
-
-def train_one_epoch(
-    wrapped_backbone: AMPVNetWithNorm,
-    head: AdaFace,
-    optimizer: torch.optim.Optimizer,
-    scaler: GradScaler,
-    train_loader,
-    device: torch.device,
-    epoch: int,
-    logger: logging.Logger,
-    use_amp: bool = False,
-) -> dict:
-    """
-    Runs one training epoch.
-
-    Returns:
-        dict with keys: loss_avg, acc_avg, duration_s
-    """
-    wrapped_backbone.train()
-    head.train()
-
-    running_loss   = 0.0
-    running_correct = 0
-    running_total  = 0
-    t0 = time.time()
-
-    for batch_idx, (images, labels) in enumerate(train_loader):
-        images = images.to(device, non_blocking=True)
-        labels = labels.to(device, non_blocking=True)
-
-        optimizer.zero_grad(set_to_none=True)
-
-        if use_amp and device.type == "cuda":
-            with autocast():
-                embeddings, norms = wrapped_backbone(images)
-                logits = head(embeddings, norms, labels)
-                loss   = F.cross_entropy(logits, labels)
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(
-                list(wrapped_backbone.parameters()) + list(head.parameters()),
-                max_norm=5.0
-            )
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            embeddings, norms = wrapped_backbone(images)
-            logits = head(embeddings, norms, labels)
-            loss   = F.cross_entropy(logits, labels)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                list(wrapped_backbone.parameters()) + list(head.parameters()),
-                max_norm=5.0
-            )
-            optimizer.step()
-
-        acc = compute_top1_accuracy(logits.detach(), labels)
-        running_loss    += loss.item()
-        running_correct += int(acc * labels.size(0))
-        running_total   += labels.size(0)
-
-        if (batch_idx + 1) % 20 == 0 or (batch_idx + 1) == len(train_loader):
-            logger.info(
-                f"  Epoch {epoch:03d} [{batch_idx+1:04d}/{len(train_loader):04d}] "
-                f"loss={running_loss / (batch_idx+1):.4f}  "
-                f"acc={running_correct / max(running_total, 1):.4f}"
-            )
-
-    duration_s = time.time() - t0
-    return {
-        "loss_avg":   running_loss  / max(len(train_loader), 1),
-        "acc_avg":    running_correct / max(running_total, 1),
-        "duration_s": duration_s,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Checkpoint helpers
-# ---------------------------------------------------------------------------
 
 def save_checkpoint(
-    path: str,
-    backbone: AMPVNet,
+    path: Path,
+    model: AMPVNet,
     head: AdaFace,
-    optimizer,
-    scheduler,
+    optimizer: Adam,
     epoch: int,
-    best_val_acc: float,
-    phase: str,
-    num_classes: int,
-    config: dict,
+    val_eer: float,
+    config: Dict[str, Any],
 ):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
-        "epoch":        epoch,
-        "model_state":  backbone.state_dict(),
-        "head_state":   head.state_dict(),
-        "optimizer":    optimizer.state_dict(),
-        "scheduler":    scheduler.state_dict(),
-        "best_val_acc": best_val_acc,
-        "phase":        phase,
-        "num_classes":  num_classes,
-        "config":       config,
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "head_state_dict": head.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "val_eer": val_eer,
+        "config": config,
     }, path)
 
 
-def load_pretrain_checkpoint(
-    path: str,
-    backbone: AMPVNet,
-    logger: logging.Logger,
-) -> dict:
-    """
-    Loads only the backbone weights from a pretrain checkpoint.
-    Returns the full checkpoint dict for reference.
-    """
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            f"Pretrain checkpoint not found: {path}\n"
-            "Run Phase 1 (pretrain) first and copy the checkpoint."
-        )
-    ckpt = torch.load(path, map_location="cpu")
-    backbone.load_state_dict(ckpt["model_state"])
-    logger.info(
-        f"[Checkpoint] Loaded pretrained backbone from {path} "
-        f"(epoch={ckpt.get('epoch', '?')}, val_acc={ckpt.get('best_val_acc', '?'):.4f})"
-    )
-    return ckpt
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-def parse_args():
-    p = argparse.ArgumentParser(
-        description="AMPVNet + AdaFace Training — Palm Vein Recognition",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    p.add_argument("--phase", required=True, choices=["pretrain", "finetune"],
-                   help="Training phase: 'pretrain' (CASIA) or 'finetune' (own data).")
-    p.add_argument("--data_root", default=None,
-                   help="Root directory of dataset. Auto-detected if not provided.")
-    p.add_argument("--pretrain_ckpt",
-                   default="training/checkpoints/pretrain_best.pt",
-                   help="Path to pretrain checkpoint for Phase 2 fine-tuning.")
-    p.add_argument("--ckpt_dir", default="training/checkpoints",
-                   help="Directory to save checkpoints.")
-    p.add_argument("--log_dir", default="training/logs",
-                   help="Directory to save training logs.")
-    p.add_argument("--epochs", type=int, default=None,
-                   help="Number of epochs. Default: 50 (pretrain), 30 (finetune).")
-    p.add_argument("--batch_size", type=int, default=None,
-                   help="Batch size. Default: 16 (pretrain), 8 (finetune).")
-    p.add_argument("--lr", type=float, default=None,
-                   help="Learning rate. Default: 1e-3 (pretrain), 1e-4 (finetune).")
-    p.add_argument("--workers", type=int, default=2,
-                   help="DataLoader worker processes.")
-    p.add_argument("--seed", type=int, default=42,
-                   help="Random seed for reproducibility.")
-    p.add_argument("--no_amp", action="store_true",
-                   help="Disable automatic mixed precision (AMP). Use on CPU or older GPU.")
-    p.add_argument("--resume", default=None,
-                   help="Path to checkpoint to resume training from.")
-    return p.parse_args()
-
-
-def main():
+def train():
     args = parse_args()
-
-    # -------------------------------------------------------------------
-    # Seed for reproducibility
-    # -------------------------------------------------------------------
     torch.manual_seed(args.seed)
 
-    # -------------------------------------------------------------------
-    # Phase-specific defaults
-    # -------------------------------------------------------------------
-    if args.phase == "pretrain":
-        epochs     = args.epochs     or 50
-        batch_size = args.batch_size or 16
-        lr         = args.lr         or 1e-3
-        data_root  = args.data_root  or "training/data_raw/casia"
-    else:  # finetune
-        epochs     = args.epochs     or 30
-        batch_size = args.batch_size or 8
-        lr         = args.lr         or 1e-4
-        data_root  = args.data_root  or "training/data_raw/own"
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    config = {
-        "phase": args.phase, "data_root": data_root, "epochs": epochs,
-        "batch_size": batch_size, "lr": lr, "seed": args.seed,
-    }
+    device = torch.device(args.device)
+    print(f"[train.py] Starting AMPVNet training on device: {device}")
+    print(f"[train.py] Config: epochs={args.epochs}, lr={args.learning_rate}, batch_size={args.batch_size}")
+    print(f"[train.py] AdaFace: m={args.adaface_m}, h={args.adaface_h}, s={args.adaface_s}")
+    print(f"[train.py] Augmentation: RPT(r={args.r_rpt}, p={args.p_rpt}), RGA(g={args.gamma_rga}, p={args.p_rga})")
 
-    logger = setup_logger(args.log_dir, args.phase)
-    logger.info(f"=== AMPVNet Training — Phase: {args.phase.upper()} ===")
-    logger.info(f"Config: {json.dumps(config, indent=2)}")
+    # Data availability check
+    data_path = Path(args.data_dir)
+    has_data = data_path.exists() and any(d.is_dir() and not d.name.startswith(".") for d in data_path.iterdir())
 
-    # -------------------------------------------------------------------
-    # Device selection
-    # -------------------------------------------------------------------
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    use_amp = (not args.no_amp) and (device.type == "cuda")
-    logger.info(f"Device: {device} | AMP: {use_amp}")
-
-    # -------------------------------------------------------------------
-    # Build transforms
-    # -------------------------------------------------------------------
-    train_tf = build_train_transform()
-    val_tf   = build_inference_transform()
-
-    # -------------------------------------------------------------------
-    # Build data loaders
-    # -------------------------------------------------------------------
-    if args.phase == "pretrain":
-        train_loader, val_loader, num_classes = build_casia_loaders(
-            data_root, train_tf, val_tf, batch_size=batch_size,
-            num_workers=args.workers,
-        )
-    else:
-        train_loader, val_loader, num_classes = build_own_loaders(
-            data_root, train_tf, val_tf, batch_size=batch_size,
-            num_workers=args.workers,
+    if not has_data:
+        raise FileNotFoundError(
+            f"Dataset directory '{args.data_dir}' does not exist or contains no subject subdirectories.\n"
+            f"Please place palm vein dataset images under: {args.data_dir}/<subject_id>/<image_file>"
         )
 
-    logger.info(f"Subjects (classes): {num_classes}")
-
-    # -------------------------------------------------------------------
-    # Build model
-    # -------------------------------------------------------------------
-    backbone  = AMPVNet(embedding_dim=512, dropout_p=0.2).to(device)
-    wrapped   = AMPVNetWithNorm(backbone).to(device)
-    head      = AdaFace(embedding_size=512, classnum=num_classes).to(device)
-
-    # --- Phase 2: Load pretrained weights and freeze early stages ---
-    if args.phase == "finetune":
-        load_pretrain_checkpoint(args.pretrain_ckpt, backbone, logger)
-        freeze_for_finetuning(backbone, logger)
-
-    total_params = backbone.count_parameters()
-    logger.info(f"AMPVNet total trainable params: {total_params:,}")
-
-    # -------------------------------------------------------------------
-    # Optimizer & Scheduler
-    # -------------------------------------------------------------------
-    optimizer = AdamW(
-        list(filter(lambda p: p.requires_grad, wrapped.parameters()))
-        + list(head.parameters()),
-        lr=lr, weight_decay=1e-4,
+    # Datasets & Loaders
+    train_dataset = PalmVeinDataset(
+        data_dir=str(data_path),
+        split="train",
+        split_ratio=args.split_ratio,
+        seed=args.seed,
+        r_rpt=args.r_rpt,
+        p_rpt=args.p_rpt,
+        gamma_rga=args.gamma_rga,
+        p_rga=args.p_rga,
     )
-    scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr * 0.01)
-    scaler    = GradScaler() if use_amp else None
+    val_dataset = PalmVeinDataset(
+        data_dir=str(data_path),
+        split="val",
+        split_ratio=args.split_ratio,
+        seed=args.seed,
+    )
 
-    # -------------------------------------------------------------------
-    # Optional: resume from checkpoint
-    # -------------------------------------------------------------------
-    start_epoch   = 1
-    best_val_acc  = 0.0
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=min(args.batch_size, len(train_dataset)),
+        shuffle=True,
+        num_workers=0 if device.type == "cpu" else args.num_workers,
+        drop_last=False,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=min(args.batch_size, len(val_dataset)),
+        shuffle=False,
+        num_workers=0 if device.type == "cpu" else args.num_workers,
+    )
 
-    if args.resume is not None:
-        logger.info(f"Resuming from checkpoint: {args.resume}")
-        ckpt = torch.load(args.resume, map_location=device)
-        backbone.load_state_dict(ckpt["model_state"])
-        head.load_state_dict(ckpt["head_state"])
-        optimizer.load_state_dict(ckpt["optimizer"])
-        scheduler.load_state_dict(ckpt["scheduler"])
-        start_epoch  = ckpt["epoch"] + 1
-        best_val_acc = ckpt.get("best_val_acc", 0.0)
-        logger.info(f"Resumed from epoch {ckpt['epoch']}, best_val_acc={best_val_acc:.4f}")
+    num_classes = train_dataset.num_classes
+    print(f"[train.py] Loaded {len(train_dataset)} train samples across {num_classes} subjects.")
+    print(f"[train.py] Loaded {len(val_dataset)} val samples across {val_dataset.num_classes} subjects.")
 
-    # -------------------------------------------------------------------
-    # Training Loop
-    # -------------------------------------------------------------------
-    best_ckpt_path = os.path.join(args.ckpt_dir, f"{args.phase}_best.pt")
-    last_ckpt_path = os.path.join(args.ckpt_dir, f"{args.phase}_last.pt")
+    # Model & Loss Head
+    model = AMPVNet(embedding_dim=512, dropout_p=0.2).to(device)
+    head = AdaFace(
+        num_classes=num_classes,
+        embedding_dim=512,
+        m=args.adaface_m,
+        h=args.adaface_h,
+        s=args.adaface_s,
+        t_alpha=args.adaface_t_alpha,
+    ).to(device)
 
-    logger.info(f"Starting training for {epochs} epochs...")
+    # Optimizer: Adam with momentum 0.9 (betas=(0.9, 0.999))
+    optimizer = Adam(
+        list(model.parameters()) + list(head.parameters()),
+        lr=args.learning_rate,
+        betas=(0.9, 0.999),
+        weight_decay=1e-4,
+    )
 
-    for epoch in range(start_epoch, epochs + 1):
-        logger.info(f"\n--- Epoch {epoch}/{epochs} ---")
+    # Scheduler: CosineAnnealingLR with minimum LR matching 0.0001 floor
+    scheduler = CosineAnnealingLR(
+        optimizer,
+        T_max=args.epochs,
+        eta_min=args.lr_min,
+    )
 
-        # Training
-        train_metrics = train_one_epoch(
-            wrapped, head, optimizer, scaler, train_loader,
-            device, epoch, logger, use_amp=use_amp,
-        )
+    best_val_eer = float("inf")
+    best_ckpt_path = output_dir / "best.pt"
+    final_ckpt_path = output_dir / "final.pt"
 
-        # Validation
-        val_acc = evaluate(wrapped, head, val_loader, device, logger)
+    print("\n--- Starting Training Loop ---")
+    start_time = time.time()
 
-        # Scheduler step
+    for epoch in range(1, args.epochs + 1):
+        model.train()
+        head.train()
+
+        total_loss = 0.0
+        total_samples = 0
+
+        for images, labels in train_loader:
+            images = images.to(device)
+            labels = labels.to(device)
+
+            optimizer.zero_grad()
+
+            # Forward pass: extract L2-normalized embeddings and pre-norm feature norms
+            embeddings, norms = model(images, return_norm=True)
+
+            # AdaFace loss: compute cross-entropy on margin-adjusted logits
+            loss = head(embeddings, norms, labels, return_loss=True)
+
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(list(model.parameters()) + list(head.parameters()), max_norm=5.0)
+            optimizer.step()
+
+            total_loss += loss.item() * len(labels)
+            total_samples += len(labels)
+
         scheduler.step()
+        epoch_loss = total_loss / max(1, total_samples)
+        current_lr = scheduler.get_last_lr()[0]
 
-        # Checkpoint: always save last
-        save_checkpoint(
-            last_ckpt_path, backbone, head, optimizer, scheduler,
-            epoch, best_val_acc, args.phase, num_classes, config,
-        )
+        # Log every epoch
+        print(f"Epoch [{epoch:03d}/{args.epochs:03d}] Loss: {epoch_loss:.4f} | LR: {current_lr:.6f}")
 
-        # Checkpoint: save best
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            save_checkpoint(
-                best_ckpt_path, backbone, head, optimizer, scheduler,
-                epoch, best_val_acc, args.phase, num_classes, config,
-            )
-            logger.info(f"  ★ New best val_acc={best_val_acc:.4f} — checkpoint saved.")
+        # Evaluate EER every eval_interval epochs (and at epoch 1 and last epoch)
+        if epoch % args.eval_interval == 0 or epoch == 1 or epoch == args.epochs:
+            val_metrics = evaluate_model(model, val_loader, device)
+            val_eer = val_metrics["eer_percent"]
+            tar01 = val_metrics["tar_at_far_01_percent"]
+            print(f"  --> Val Metrics [Epoch {epoch:03d}]: EER = {val_eer:.2f}% | TAR@FAR=0.01 = {tar01:.2f}% (thresh = {val_metrics['threshold']:.4f})")
 
-        logger.info(
-            f"  [Epoch {epoch:03d}] "
-            f"train_loss={train_metrics['loss_avg']:.4f}  "
-            f"train_acc={train_metrics['acc_avg']:.4f}  "
-            f"val_acc={val_acc:.4f}  "
-            f"lr={scheduler.get_last_lr()[0]:.6f}  "
-            f"({train_metrics['duration_s']:.1f}s)"
-        )
+            # Checkpoint best model (lowest val EER)
+            if val_eer < best_val_eer:
+                best_val_eer = val_eer
+                save_checkpoint(
+                    best_ckpt_path,
+                    model,
+                    head,
+                    optimizer,
+                    epoch,
+                    val_eer,
+                    vars(args),
+                )
+                print(f"  ★ Saved new best checkpoint to: {best_ckpt_path} (EER: {best_val_eer:.2f}%)")
 
-    logger.info(f"\n=== Training complete. Best val_acc: {best_val_acc:.4f} ===")
-    logger.info(f"Best checkpoint saved to: {best_ckpt_path}")
-    logger.info("Next step: run 'python training/export_onnx.py' to export to ONNX.")
+    # Save final checkpoint
+    save_checkpoint(
+        final_ckpt_path,
+        model,
+        head,
+        optimizer,
+        args.epochs,
+        best_val_eer,
+        vars(args),
+    )
+    print(f"\n[train.py] Saved final checkpoint to: {final_ckpt_path}")
+
+    # If best.pt was never saved (e.g. 1 epoch smoke test without eval), save final as best
+    if not best_ckpt_path.exists():
+        save_checkpoint(best_ckpt_path, model, head, optimizer, args.epochs, best_val_eer, vars(args))
+
+    elapsed = time.time() - start_time
+    print(f"[train.py] Training completed in {elapsed:.1f}s. Best Val EER: {best_val_eer:.2f}%")
 
 
 if __name__ == "__main__":
-    main()
+    train()

@@ -17,6 +17,11 @@ data_raw/own/*/
 !data_raw/casia/.gitkeep
 !data_raw/own/.gitkeep
 
+# --- Reference Repositories & Local Data ---
+reference/
+data/
+data_synthetic/
+
 # --- Logs (generated at runtime) ---
 logs/*.log
 logs/*.txt
