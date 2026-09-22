@@ -248,12 +248,25 @@ export default function App() {
 
   // Stale Timer Guards & Inactivity Management
   const resultAutoReturnTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const idleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const graceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastResultDismissedRef = useRef<number>(0);
 
   const clearResultAutoReturn = () => {
     if (resultAutoReturnTimerRef.current) {
       clearTimeout(resultAutoReturnTimerRef.current);
       resultAutoReturnTimerRef.current = null;
+    }
+  };
+
+  const clearIdleTimers = () => {
+    if (idleTimeoutRef.current) {
+      clearTimeout(idleTimeoutRef.current);
+      idleTimeoutRef.current = null;
+    }
+    if (graceTimeoutRef.current) {
+      clearTimeout(graceTimeoutRef.current);
+      graceTimeoutRef.current = null;
     }
   };
 
@@ -270,6 +283,7 @@ export default function App() {
   useEffect(() => {
     return () => {
       clearResultAutoReturn();
+      clearIdleTimers();
     };
   }, [appState]);
 
@@ -293,12 +307,9 @@ export default function App() {
     if (appState !== 'scan') return;
     if (isScanning || scanCountdown !== null || resultOverlay !== null) return;
 
-    let idleTimeout: ReturnType<typeof setTimeout> | null = null;
-    let graceTimeout: ReturnType<typeof setTimeout> | null = null;
-
     const startIdleCountdown = () => {
-      if (idleTimeout) clearTimeout(idleTimeout);
-      idleTimeout = setTimeout(() => {
+      if (idleTimeoutRef.current) clearTimeout(idleTimeoutRef.current);
+      idleTimeoutRef.current = setTimeout(() => {
         if (appStateRef.current === 'scan') {
           setAppState('idle');
         }
@@ -309,7 +320,7 @@ export default function App() {
     const graceDelay = Math.max(0, 1500 - elapsedSinceDismiss);
 
     if (graceDelay > 0) {
-      graceTimeout = setTimeout(() => {
+      graceTimeoutRef.current = setTimeout(() => {
         startIdleCountdown();
       }, graceDelay);
     } else {
@@ -325,8 +336,8 @@ export default function App() {
     window.addEventListener('keydown', resetOnUserActivity, { passive: true });
 
     return () => {
-      if (graceTimeout) clearTimeout(graceTimeout);
-      if (idleTimeout) clearTimeout(idleTimeout);
+      if (graceTimeoutRef.current) clearTimeout(graceTimeoutRef.current);
+      if (idleTimeoutRef.current) clearTimeout(idleTimeoutRef.current);
       window.removeEventListener('touchstart', resetOnUserActivity);
       window.removeEventListener('mousedown', resetOnUserActivity);
       window.removeEventListener('keydown', resetOnUserActivity);
