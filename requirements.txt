@@ -1,9 +1,20 @@
+# requirements.txt — Production & Raspberry Pi Runtime Dependencies
+# =================================================================
+# Minimal runtime environment for palm vein biometric recognition on edge hardware.
+#
+# NOTE FOR RASPBERRY PI OS (Debian Bookworm):
+# If running in a virtual environment created with '--system-site-packages',
+# opencv and picamera2 can be provided directly by system apt packages:
+#   sudo apt install -y python3-picamera2 python3-opencv
+#
+# To install pip runtime packages on Raspberry Pi:
+#   pip install -r requirements.txt
+
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
+numpy>=1.26.0,<2.0.0
 opencv-python>=4.10.0
-numpy>=1.26.0
-scipy>=1.14.0
 mediapipe>=0.10.0
-pillow>=11.0.0
+pillow>=10.0.0
 onnxruntime>=1.19.0
-
+scipy>=1.14.0

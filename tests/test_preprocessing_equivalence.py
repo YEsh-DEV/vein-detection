@@ -17,9 +17,14 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 sys.path.insert(0, str(_PROJECT_ROOT / "training"))
 
-import torch
-from dataset import preprocess_image_to_tensor
-from model import AMPVNet
+try:
+    import torch
+    from dataset import preprocess_image_to_tensor
+    from model import AMPVNet
+    TORCH_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    TORCH_AVAILABLE = False
+
 from app.ampvnet_inference import AMPVNetInference, extract_embedding, cosine_similarity
 
 
@@ -28,6 +33,10 @@ class TestPreprocessingEquivalence(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        if not TORCH_AVAILABLE:
+            raise unittest.SkipTest(
+                "PyTorch is not installed (training-only dependency; not required on Pi runtime)."
+            )
         cls.engine = AMPVNetInference()
         cls.test_images = list((_PROJECT_ROOT / "training/data_processed/own_splits/test").glob("*/*.png"))
         if not cls.test_images:

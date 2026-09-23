@@ -1,0 +1,11 @@
+# requirements-dev.txt — Development & Full Test Suite Dependencies
+# =================================================================
+# Extends runtime requirements with packages needed for FastAPI TestClient
+# integration tests and development fixtures.
+#
+# Install with:
+#   pip install -r requirements-dev.txt
+
+-r requirements.txt
+httpx>=0.27.0
+pytest>=8.0.0

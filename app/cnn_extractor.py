@@ -13,6 +13,7 @@ from app.ampvnet_inference import (
     extract_embedding,
     cosine_similarity,
     MODEL_LOADED,
+    MODEL_ERROR_DETAIL,
     EMBEDDING_DIM,
 )
 
@@ -22,5 +23,6 @@ __all__ = [
     "extract_embedding",
     "cosine_similarity",
     "MODEL_LOADED",
+    "MODEL_ERROR_DETAIL",
     "EMBEDDING_DIM",
 ]

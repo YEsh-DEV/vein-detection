@@ -73,28 +73,46 @@ class AMPVNetInference:
     def _init_session(self):
         try:
             import onnxruntime as ort
+        except (ImportError, ModuleNotFoundError) as e:
+            self.model_loaded = False
+            self.error_detail = (
+                f"ONNX Runtime package is not installed ({e}). "
+                "Please run on Raspberry Pi: pip install onnxruntime"
+            )
+            logger.error(f"[ampvnet_inference] {self.error_detail}")
+            return
 
+        try:
             # Configure session options for CPU execution (optimized for Pi 5 4-core Cortex-A76)
             sess_options = ort.SessionOptions()
             sess_options.intra_op_num_threads = 4
             sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
             sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
+            available_providers = ort.get_available_providers()
+            target_providers = (
+                ["CPUExecutionProvider"]
+                if "CPUExecutionProvider" in available_providers
+                else available_providers
+            )
+
             self.session = ort.InferenceSession(
                 str(self.model_path),
                 sess_options=sess_options,
-                providers=["CPUExecutionProvider"]
+                providers=target_providers,
             )
             self.input_name = self.session.get_inputs()[0].name
             self.output_name = self.session.get_outputs()[0].name
             self.model_loaded = True
             logger.info(
                 f"[ampvnet_inference] Loaded AMPVNet ONNX model from {self.model_path} "
-                f"(input='{self.input_name}', output='{self.output_name}')"
+                f"(provider={target_providers}, input='{self.input_name}', output='{self.output_name}')"
             )
         except Exception as e:
             self.model_loaded = False
-            self.error_detail = f"ONNX Runtime initialization failed: {e}"
+            self.error_detail = (
+                f"Failed to initialize ONNX session from {self.model_path}: {e}"
+            )
             logger.error(f"[ampvnet_inference] {self.error_detail}")
 
     @staticmethod
@@ -211,5 +229,7 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.clip(np.dot(a, b), -1.0, 1.0))
 
 
-# Export flag matching cnn_extractor.py contract
-MODEL_LOADED = get_inference_engine().model_loaded
+# Export flags matching cnn_extractor.py contract
+_init_eng = get_inference_engine()
+MODEL_LOADED = _init_eng.model_loaded
+MODEL_ERROR_DETAIL = _init_eng.error_detail

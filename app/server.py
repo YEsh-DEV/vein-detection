@@ -64,7 +64,7 @@ try:
         extract_ma2017_scaled_roi, enhance_roi_vessels,
         compute_roi_quality, draw_landmarks_overlay,
     )
-    from app.cnn_extractor import extract_embedding, MODEL_LOADED
+    from app.cnn_extractor import extract_embedding, MODEL_LOADED, MODEL_ERROR_DETAIL
 except ImportError:
     from constants import (
         PROJECT_ROOT, STATIC_DIR, CAPTURE_DIR, ROI_DIR, MODEL_PATH,
@@ -86,7 +86,7 @@ except ImportError:
         extract_ma2017_scaled_roi, enhance_roi_vessels,
         compute_roi_quality, draw_landmarks_overlay,
     )
-    from cnn_extractor import extract_embedding, MODEL_LOADED
+    from cnn_extractor import extract_embedding, MODEL_LOADED, MODEL_ERROR_DETAIL
 
 # Ensure proper MIME types on all OS platforms (especially Windows)
 mimetypes.add_type("application/javascript", ".js")
@@ -280,6 +280,7 @@ class StatusResponse(BaseModel):
     camera_device: Optional[str] = None
     camera_error: Optional[str] = None
     model_loaded: bool
+    model_error: Optional[str] = None
     enrolled_users_count: int
     total_templates: int
     match_threshold: float
@@ -557,6 +558,7 @@ def health_check():
         "status": "healthy",
         "engine": BIOMETRIC_ENGINE,
         "model_loaded": (landmarker is not None and MODEL_LOADED),
+        "model_error": MODEL_ERROR_DETAIL if not MODEL_LOADED else None,
         "camera_available": CAMERA_AVAILABLE,
     }
 
@@ -614,6 +616,7 @@ async def get_status():
         "camera_device": CAMERA_DEVICE,
         "camera_error": CAMERA_ERROR_DETAIL if not CAMERA_AVAILABLE else None,
         "model_loaded": (landmarker is not None and MODEL_LOADED),
+        "model_error": MODEL_ERROR_DETAIL if not MODEL_LOADED else None,
         "enrolled_users_count": len(users),
         "total_templates": len(emb_data["template_ids"]),
         "match_threshold": float(MATCH_THRESHOLD),
@@ -637,7 +640,12 @@ async def reset_database():
 @app.post("/api/scan", response_model=ScanResponse)
 async def scan_palm():
     if not MODEL_LOADED:
-        raise HTTPException(status_code=503, detail="CNN model not loaded, cannot perform recognition.")
+        err_msg = (
+            f"Biometric model not loaded: {MODEL_ERROR_DETAIL}"
+            if MODEL_ERROR_DETAIL
+            else "CNN model not loaded, cannot perform recognition."
+        )
+        raise HTTPException(status_code=503, detail=err_msg)
 
     if not CAMERA_AVAILABLE:
         raise HTTPException(status_code=503, detail="Camera hardware not available.")
@@ -725,9 +733,14 @@ async def scan_palm():
 @app.post("/api/enroll/sample", response_model=SampleResponse)
 async def enroll_sample(req: SampleReq):
     if not MODEL_LOADED:
+        err_msg = (
+            f"Biometric model not loaded: {MODEL_ERROR_DETAIL}"
+            if MODEL_ERROR_DETAIL
+            else "CNN model not loaded, cannot enroll."
+        )
         raise HTTPException(
             status_code=503,
-            detail="CNN model not loaded, cannot enroll"
+            detail=err_msg
         )
 
     _cleanup_expired_enrollment_cache()

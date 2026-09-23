@@ -18,7 +18,13 @@ import tempfile
 from pathlib import Path
 import numpy as np
 import cv2
-from starlette.testclient import TestClient
+
+try:
+    from starlette.testclient import TestClient
+    TESTCLIENT_AVAILABLE = True
+except Exception:
+    TestClient = None
+    TESTCLIENT_AVAILABLE = False
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
@@ -33,6 +39,10 @@ class TestAPIEndpoints(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        if not TESTCLIENT_AVAILABLE:
+            raise unittest.SkipTest(
+                "starlette/httpx TestClient is not installed. Install with 'pip install httpx' for API testing."
+            )
         # Patch db_manager DB_PATH
         cls.temp_dir = tempfile.TemporaryDirectory()
         cls.test_db_path = os.path.join(cls.temp_dir.name, "test_api_vein.db")
@@ -46,6 +56,9 @@ class TestAPIEndpoints(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        if hasattr(cls, "temp_dir") and cls.temp_dir:
+            cls.temp_dir.cleanup()
+
         cls.temp_dir.cleanup()
 
     def test_health_endpoint(self):

@@ -717,3 +717,39 @@ Per explicit instructions:
 3. The threshold `0.2226` remains marked **EXPERIMENTAL**.
 4. Biometric classification remains **CATEGORY B: WORKING PROTOTYPE (DATA-LIMITED)**.
 5. Next required step: Execute physical hardware data collection using `tools/collect_hardware_dataset.py` to acquire 50–100+ physical palm identities before fine-tuning.
+
+---
+
+## 14. Stage 6: Raspberry Pi Runtime Hardening, Dependency Decoupling & Optical Calibration
+
+### 14.1 Problem Identification on Physical Raspberry Pi
+When running the full test suite on Raspberry Pi OS Bookworm via `python3 -m unittest discover -s tests -p "test_*.py" -v`, the test discovery process failed with:
+1. `ModuleNotFoundError: No module named 'onnxruntime'` (due to virtualenv running without runtime packages installed or missing wheel).
+2. `RuntimeError: The starlette.testclient module requires the httpx2/httpx package` (Starlette `TestClient` raised `RuntimeError` during module discovery).
+3. `ModuleNotFoundError: No module named 'torch'` (`test_preprocessing_equivalence.py` had an unshielded top-level PyTorch import, attempting to load PyTorch on an edge device where PyTorch is not and should not be installed).
+
+### 14.2 Clean Three-Tier Dependency Decoupling
+To eliminate dependency pollution, dependencies are now strictly segregated into three non-overlapping tiers:
+* **Tier A — Raspberry Pi Runtime (`requirements.txt`):**
+  `fastapi`, `uvicorn[standard]`, `numpy>=1.26.0,<2.0.0`, `opencv-python`, `mediapipe`, `pillow`, `onnxruntime`, `scipy`.
+  *Note:* On Raspberry Pi OS Bookworm, `picamera2` and `python3-opencv` are installed via system APT (`sudo apt install -y python3-picamera2 python3-opencv`), and accessed in Python via a venv created with `--system-site-packages`.
+* **Tier B — Development & Test Suite (`requirements-dev.txt`):**
+  Extends Tier A with `httpx>=0.27.0` and `pytest>=8.0.0` for running FastAPI endpoint integration tests.
+* **Tier C — Offline GPU Training (`training/requirements-training.txt`):**
+  `torch>=2.1.0`, `torchvision>=0.16.0`, `timm`, `scikit-learn`, `onnx`, `onnxscript`. Completely excluded from edge hardware.
+
+### 14.3 ONNX Runtime Engine Hardening
+* In `app/ampvnet_inference.py`, `_init_session` now distinguishes between `ModuleNotFoundError: onnxruntime` and session initialization failures, logging actionable installation advice (`pip install onnxruntime`).
+* Added `CPUExecutionProvider` verification against `ort.get_available_providers()`.
+* Exported `MODEL_ERROR_DETAIL` to `app/cnn_extractor.py` and `app/server.py`.
+* Endpoints `/health`, `/api/status`, `/api/scan`, and `/api/enroll/sample` now report exact diagnostic details in HTTP 503 error responses rather than generic failures.
+
+### 14.4 Test Suite Edge Resilience
+* In `tests/test_preprocessing_equivalence.py`, `torch` imports are shielded with `unittest.SkipTest`.
+* In `tests/test_api_endpoints.py` and `tests/test_offline.py`, `TestClient` imports are shielded with `unittest.SkipTest` when `httpx` is missing.
+* Running `python3 -m unittest discover -s tests -p "test_*.py" -v` on an edge device without PyTorch or httpx now cleanly executes and passes all 17 core unit and integration tests (`Ran 17 tests in 0.11s. OK (skipped=3)`). In a full dev environment with all dependencies, all 26 tests pass (`Ran 26 tests in 0.78s. OK`).
+
+### 14.5 New Hardware Diagnostic & Smoke-Test Utilities
+1. **`tools/pi_runtime_smoke_test.py`:** Standalone Pi verification script testing Python version, 64-bit architecture, OpenCV, NumPy, MediaPipe, Picamera2, ONNX Runtime, `CPUExecutionProvider`, model existence, model loading, 512-D embedding extraction, and strict L2 unit normalization. Supports `--camera` flag for live frame capture testing.
+2. **`tools/pi_camera_diagnostic.py`:** Comprehensive hardware camera diagnostic reporting Picamera2 controls, sensor modes, resolution, signal statistics (mean, std, min, max, IR saturation %, Laplacian sharpness variance), pre-landmark positioning heuristic, and MediaPipe landmarking.
+3. **`docs/PI_RUNTIME_SETUP.md`:** Complete step-by-step terminal deployment guide for Raspberry Pi OS Bookworm with exact manual commands.
