@@ -48,6 +48,7 @@ try:
         diagnose_hand_positioning,
         detect_hand_landmarks_with_diagnostics,
         extract_valleys_from_landmarks,
+        segment_hand,
         extract_ma2017_scaled_roi,
         compute_roi_quality,
         enhance_roi_vessels,
@@ -227,6 +228,7 @@ def analyze_frame_signal(gray: np.ndarray):
 
 
 def run_diagnostics(args):
+    pipeline_errors = []
     print_header("RASPBERRY PI PALM-VEIN CAMERA & CAPTURE DIAGNOSTIC")
     print(f"Timestamp : {time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Host OS   : {sys.platform} | Python: {sys.version.split()[0]}")
@@ -344,24 +346,41 @@ def run_diagnostics(args):
             landmarks = mp_diag["landmarks"]
             print_status("MediaPipe HandLandmarker", "PASS", f"Detected 21 joints (Wrist at {landmarks[0]})")
 
-            valleys = extract_valleys_from_landmarks(landmarks, gray.shape)
+            valleys = extract_valleys_from_landmarks(landmarks)
             if valleys is not None and len(valleys) >= 2:
                 v1, v2 = valleys[0], valleys[1]
                 print_status("Knuckle Valley Detection", "PASS", f"Found valleys: V1={v1}, V2={v2}")
 
-                roi = extract_ma2017_scaled_roi(gray, v1, v2, target_size=(224, 224))
-                if roi is not None and roi.shape == (224, 224):
-                    quality = compute_roi_quality(roi)
-                    print_status("224x224 ROI Extraction", "PASS",
-                                 f"Pad: {quality['pad_pct']*100:.1f}%, Contrast Std: {quality['contrast_std']:.1f}, Valid: {quality['valid']}")
+                hand_mask = segment_hand(gray)
+                roi_res = extract_ma2017_scaled_roi(
+                    gray, v1, v2, hand_mask,
+                    target_size=224, scale_factor=1.6, offset_factor=0.35,
+                    landmarks_px=landmarks
+                )
+                if roi_res is not None:
+                    roi_224, bbox, _ = roi_res
+                    if roi_224 is not None and roi_224.shape == (224, 224):
+                        quality = compute_roi_quality(roi_224, bbox, gray.shape)
+                        is_valid = quality.get("is_valid", quality.get("valid", False))
+                        status = "PASS" if is_valid else "WARN"
+                        print_status("224x224 ROI Extraction", status,
+                                     f"Pad: {quality['pad_pct']*100:.1f}%, Contrast Std: {quality['contrast_std']:.1f}, Valid: {is_valid}")
+                        if not is_valid:
+                            recommendations.append(f"[ROI QUALITY] Quality gate warning: {', '.join(quality.get('reasons', []))}")
+                    else:
+                        print_status("224x224 ROI Extraction", "FAIL", "Failed to crop or scale ROI to (224, 224)")
+                        pipeline_errors.append("224x224 ROI Extraction: Failed to crop or scale ROI to (224, 224)")
                 else:
-                    print_status("224x224 ROI Extraction", "FAIL", "Failed to crop or scale ROI")
+                    print_status("224x224 ROI Extraction", "FAIL", "extract_ma2017_scaled_roi returned None")
+                    pipeline_errors.append("extract_ma2017_scaled_roi returned None")
             else:
                 print_status("Knuckle Valley Detection", "FAIL", "Unable to compute knuckle valleys from landmarks")
+                pipeline_errors.append("Knuckle Valley Detection: Unable to compute knuckle valleys from landmarks")
         else:
             print_status("MediaPipe HandLandmarker", "FAIL", f"Reason: {mp_diag['reason']} — {mp_diag['instruction']}")
     except Exception as e:
         print_status("MediaPipe Pipeline", "FAIL", f"Exception during execution: {e}")
+        pipeline_errors.append(f"MediaPipe Pipeline Exception: {e}")
 
     # =========================================================================
     # 5. PHASE 4: AMPVNet ONNX INFERENCE SMOKE TEST
@@ -379,16 +398,25 @@ def run_diagnostics(args):
                 print_status("Embedding Inference", "PASS", f"512-D float32 vector, L2 norm = {norm:.6f}")
             else:
                 print_status("Embedding Inference", "FAIL", f"Invalid embedding dimension ({len(emb)}) or norm ({norm})")
+                pipeline_errors.append(f"Invalid embedding dimension ({len(emb)}) or norm ({norm})")
         else:
             print_status("AMPVNet ONNX Engine", "FAIL", f"Model not loaded ({engine.error_detail})")
+            pipeline_errors.append(f"AMPVNet ONNX Engine Model Not Loaded: {engine.error_detail}")
     except Exception as e:
         print_status("AMPVNet ONNX Engine", "FAIL", f"Inference check error: {e}")
+        pipeline_errors.append(f"AMPVNet ONNX Engine Exception: {e}")
 
     # =========================================================================
     # 6. ACTIONABLE OPERATOR RECOMMENDATIONS
     # =========================================================================
     print_header("6. ACTIONABLE OPERATOR RECOMMENDATIONS")
     recommendations = []
+
+    if pipeline_errors:
+        print("\n  \033[91m[✗ FAIL] PIPELINE IMPLEMENTATION / RUNTIME ERRORS DETECTED:\033[0m")
+        for err in pipeline_errors:
+            print(f"    * {err}")
+        recommendations.append("[PIPELINE ERROR] Hardware diagnostic detected pipeline errors. Resolve API/code mismatches before running live biometric server.")
 
     if source == "SYNTHETIC":
         print("  \033[94m[INFO] SYNTHETIC SIMULATION COMPLETE: Algorithmic pipeline executed on synthetic pixels.\033[0m")
@@ -417,12 +445,6 @@ def run_diagnostics(args):
                 "        * Instruct users to keep fingers within the outer framing guides."
             )
 
-        if not recommendations:
-            print("  \033[92m[✓] All diagnostic checks passed! Optical signal, positioning, and inference are optimal.\033[0m")
-        else:
-            for r in recommendations:
-                print(f"  {r}\n")
-
     # Optional frame save
     if args.save_frame and frame_bgr is not None:
         save_path = Path(args.save_frame)
@@ -431,6 +453,17 @@ def run_diagnostics(args):
         print(f"\n[+] Saved diagnostic frame to: {save_path.resolve()}")
 
     print("=" * 70 + "\n")
+
+    if pipeline_errors:
+        print("  \033[91m[✗] Diagnostic failed due to implementation/pipeline errors.\033[0m")
+        return 1
+
+    if not recommendations:
+        print("  \033[92m[✓] All diagnostic checks passed! Optical signal, positioning, and inference are optimal.\033[0m")
+    else:
+        for r in recommendations:
+            print(f"  {r}\n")
+
     return 0
 
 

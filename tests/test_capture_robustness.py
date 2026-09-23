@@ -47,6 +47,9 @@ from app.mediapipe_img import (
     diagnose_hand_positioning,
     detect_hand_landmarks_with_diagnostics,
     compute_roi_quality,
+    extract_valleys_from_landmarks,
+    segment_hand,
+    extract_ma2017_scaled_roi,
 )
 import app.server as server
 import app.db_manager as db_manager
@@ -305,8 +308,8 @@ class TestCaptureRobustness(unittest.TestCase):
         """Verifies /api/enroll/sample returns HTTP 400 with structured JSON on capture failure."""
         try:
             from starlette.testclient import TestClient
-        except ImportError:
-            raise unittest.SkipTest("TestClient not available")
+        except (ImportError, RuntimeError):
+            raise unittest.SkipTest("TestClient not available in this environment")
 
         sample_err = CaptureError(
             error_code=CODE_HAND_TOO_CLOSE,
@@ -333,8 +336,8 @@ class TestCaptureRobustness(unittest.TestCase):
         """Verifies /api/scan returns HTTP 400 with structured JSON on capture failure."""
         try:
             from starlette.testclient import TestClient
-        except ImportError:
-            raise unittest.SkipTest("TestClient not available")
+        except (ImportError, RuntimeError):
+            raise unittest.SkipTest("TestClient not available in this environment")
 
         scan_err = CaptureError(
             error_code=CODE_MEDIAPIPE_NO_LANDMARKS,
@@ -355,6 +358,103 @@ class TestCaptureRobustness(unittest.TestCase):
             self.assertEqual(data["error_code"], CODE_MEDIAPIPE_NO_LANDMARKS)
             self.assertEqual(data["stage"], "mediapipe")
             self.assertIsInstance(data["detail"], str)
+
+    # -----------------------------------------------------------------------
+    # 6. Pipeline Signature & Contract Verification
+    # -----------------------------------------------------------------------
+    def test_12_pipeline_signature_contracts(self):
+        """
+        Guarantees that pipeline functions enforce their exact production signatures:
+        1. extract_valleys_from_landmarks(landmarks_px: list) takes exactly 1 positional arg.
+           Passing 2 arguments must raise TypeError.
+        2. extract_ma2017_scaled_roi returns a 3-tuple (roi_normalized, bbox, rotated_gray).
+        3. compute_roi_quality takes exactly 3 positional args (roi_224, bbox, frame_shape).
+        """
+        # Synthetic 21-point palm skeleton
+        synthetic_landmarks = [
+            (320, 420),  # L0: Wrist
+            (280, 360), (260, 320), (250, 280), (240, 250),  # L1-L4: Thumb
+            (290, 290), (280, 240), (275, 200), (270, 160),  # L5-L8: Index (L5=MCP)
+            (320, 285), (320, 230), (320, 190), (320, 150),  # L9-L12: Middle (L9=MCP)
+            (350, 290), (355, 240), (360, 200), (365, 165),  # L13-L16: Ring (L13=MCP)
+            (380, 305), (390, 260), (395, 225), (400, 190),  # L17-L20: Pinky (L17=MCP)
+        ]
+
+        # 1. extract_valleys_from_landmarks takes 1 positional argument
+        pv1, pv2 = extract_valleys_from_landmarks(synthetic_landmarks)
+        self.assertIsInstance(pv1, tuple)
+        self.assertIsInstance(pv2, tuple)
+        self.assertEqual(len(pv1), 2)
+        self.assertEqual(len(pv2), 2)
+
+        # Calling with 2 positional arguments MUST raise TypeError
+        with self.assertRaises(TypeError):
+            extract_valleys_from_landmarks(synthetic_landmarks, (480, 640))
+
+        # 2. extract_ma2017_scaled_roi
+        gray = np.ones((480, 640), dtype=np.uint8) * 128
+        hand_mask = segment_hand(gray)
+        roi_res = extract_ma2017_scaled_roi(
+            gray, pv1, pv2, hand_mask,
+            target_size=224, scale_factor=1.6, offset_factor=0.35,
+            landmarks_px=synthetic_landmarks
+        )
+        self.assertIsInstance(roi_res, tuple)
+        self.assertEqual(len(roi_res), 3, "extract_ma2017_scaled_roi must return a 3-tuple (roi, bbox, rotated)")
+        roi_224, bbox, rot = roi_res
+        self.assertEqual(roi_224.shape, (224, 224))
+        self.assertEqual(len(bbox), 4)
+
+        # 3. compute_roi_quality takes 3 positional arguments
+        quality = compute_roi_quality(roi_224, bbox, gray.shape)
+        self.assertIn("is_valid", quality)
+        self.assertIn("pad_pct", quality)
+        self.assertIn("contrast_std", quality)
+
+        with self.assertRaises(TypeError):
+            compute_roi_quality(roi_224)
+
+    def test_13_server_pipeline_contract_consistency(self):
+        """
+        Verifies that app/server.py capture pipeline executes without any TypeError
+        using the production contract for both scan and enroll.
+        """
+        synthetic_landmarks = [
+            (320, 420),
+            (280, 360), (260, 320), (250, 280), (240, 250),
+            (290, 290), (280, 240), (275, 200), (270, 160),
+            (320, 285), (320, 230), (320, 190), (320, 150),
+            (350, 290), (355, 240), (360, 200), (365, 165),
+            (380, 305), (390, 260), (395, 225), (400, 190),
+        ]
+
+        dummy_emb = np.random.randn(512).astype(np.float32)
+        dummy_emb /= np.linalg.norm(dummy_emb)
+
+        gray = np.random.randint(40, 200, (480, 640), dtype=np.uint8)
+
+        # Test process_image_with_timing (used by /api/scan)
+        with patch("app.server.detect_hand_landmarks", return_value=synthetic_landmarks), \
+             patch("app.server.extract_embedding", return_value=dummy_emb):
+            clahe_roi, emb, timing = server.process_image_with_timing(gray)
+            self.assertEqual(clahe_roi.shape, (224, 224))
+            self.assertEqual(len(emb), 512)
+            self.assertIn("landmark_ms", timing)
+
+        # Test process_enrollment_sample (used by /api/enroll/sample)
+        mock_diag = {
+            "success": True,
+            "landmarks": synthetic_landmarks,
+            "reason": "OK",
+            "instruction": "OK",
+            "diagnostics": {"occupancy_pct": 35.0, "border_touches": 0}
+        }
+        with patch("app.server.detect_hand_landmarks_with_diagnostics", return_value=mock_diag), \
+             patch("app.server.extract_embedding", return_value=dummy_emb):
+            clahe_roi, emb, quality = server.process_enrollment_sample(gray)
+            self.assertEqual(clahe_roi.shape, (224, 224))
+            self.assertEqual(len(emb), 512)
+            self.assertIn("is_valid", quality)
 
 
 if __name__ == "__main__":

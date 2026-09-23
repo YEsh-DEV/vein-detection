@@ -248,13 +248,47 @@ class RuntimeSmokeTester:
                         "PASS" if laplacian_var >= 45.0 else "WARN",
                         f"Laplacian Var = {laplacian_var:.1f} (Target > 45.0)")
 
-        # Landmark detection check
+        # Landmark & ROI pipeline check
         try:
-            from app.mediapipe_img import build_landmarker, detect_hand_landmarks_with_diagnostics
+            from app.mediapipe_img import (
+                build_landmarker,
+                detect_hand_landmarks_with_diagnostics,
+                extract_valleys_from_landmarks,
+                segment_hand,
+                extract_ma2017_scaled_roi,
+                compute_roi_quality,
+            )
             landmarker = build_landmarker()
             diag = detect_hand_landmarks_with_diagnostics(gray, landmarker)
             if diag["success"]:
+                landmarks = diag["landmarks"]
                 self.log_result("Live Palm Detection", "PASS", "21 hand landmarks detected!")
+                try:
+                    pv1, pv2 = extract_valleys_from_landmarks(landmarks)
+                    if pv1 is not None and pv2 is not None:
+                        self.log_result("Knuckle Valley Extraction", "PASS", f"Pv1={pv1}, Pv2={pv2}")
+                        hand_mask = segment_hand(gray)
+                        roi_res = extract_ma2017_scaled_roi(
+                            gray, pv1, pv2, hand_mask,
+                            target_size=224, scale_factor=1.6, offset_factor=0.35,
+                            landmarks_px=landmarks
+                        )
+                        if roi_res is not None:
+                            roi_224, bbox, _ = roi_res
+                            if roi_224 is not None and roi_224.shape == (224, 224):
+                                quality = compute_roi_quality(roi_224, bbox, gray.shape)
+                                is_valid = quality.get("is_valid", quality.get("valid", False))
+                                status = "PASS" if is_valid else "WARN"
+                                self.log_result("224x224 ROI Extraction", status,
+                                                f"Pad: {quality['pad_pct']*100:.1f}%, Contrast Std: {quality['contrast_std']:.1f}, Valid: {is_valid}")
+                            else:
+                                self.log_result("224x224 ROI Extraction", "FAIL", "Invalid ROI shape")
+                        else:
+                            self.log_result("224x224 ROI Extraction", "FAIL", "extract_ma2017_scaled_roi returned None")
+                    else:
+                        self.log_result("Knuckle Valley Extraction", "FAIL", "Could not derive knuckle valleys")
+                except Exception as e:
+                    self.log_result("Pipeline Execution", "FAIL", f"ROI/Valley pipeline error: {e}")
             else:
                 self.log_result("Live Palm Detection", "INFO",
                                 f"{diag['reason']}: {diag['instruction']}")
