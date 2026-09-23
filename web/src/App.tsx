@@ -873,23 +873,23 @@ export default function App() {
               - Clean 3-second countdown
              ══════════════════════════════════════════════════════════════════════ */}
           {appState === 'scan' && (
-            <div className="flex-1 flex flex-col p-4 sm:p-6 space-y-3 animate-fadeIn overflow-y-auto pb-6 w-full max-w-[800px] mx-auto">
+            <div className="flex-1 flex flex-col p-2.5 sm:p-4 w-full h-full justify-between animate-fadeIn overflow-hidden">
              
-              {/* Header Bar: Centered Mode Badge (Duplicate top buttons removed) */}
-              <div className="flex items-center justify-center">
+              {/* Header Bar: Centered Mode Badge */}
+              <div className="flex items-center justify-center shrink-0">
                 <div className="px-4 py-1.5 bg-[#FFDE59] border-[2px] border-black rounded-xl text-xs font-black shadow-[2px_2px_0px_#121212] flex items-center gap-1.5">
                   <ShieldCheck className="w-3.5 h-3.5 stroke-[2.5]" />
                   <span>PALM SCAN MODE</span>
                 </div>
               </div>
 
-              {/* Dominant Camera Viewport — enlarged to fill the kiosk screen */}
-              <div className="w-full relative flex flex-col items-center shrink-0">
+              {/* Dominant Camera Viewport — FILLS ALL REMAINING SPACE */}
+              <div className="w-full flex-1 min-h-0 my-2 relative flex items-center justify-center overflow-hidden">
                 <CameraViewport 
                   cameraState={cameraState}
                   cameraErrorDetail={cameraErrorDetail}
                   onRetry={loadStatus}
-                  className="w-full h-[580px] sm:h-[640px]"
+                  className="w-full h-full"
                 >
                   {/* Soft Minimal Guide - Fits Either Hand, Unobstructed Video */}
                   <SoftPalmGuide />
@@ -915,85 +915,88 @@ export default function App() {
                 </CameraViewport>
               </div>
 
-              {/* Status Guidance Indicator (Below the camera, not covering the video) */}
-              <div className="text-center">
-                <span className={`inline-block px-4 py-1.5 rounded-full text-xs font-black border-[2px] border-black shadow-[2px_2px_0px_#121212] ${
-                  scanCountdown !== null 
-                    ? 'bg-[#FFDE59] text-black animate-pulse' 
-                    : isScanning 
-                    ? 'bg-[#38BDF8] text-black' 
-                    : cameraState === 'live' 
-                    ? 'bg-[#CCFF00] text-black' 
-                    : 'bg-[#FF4081] text-white'
-                }`}>
-                  {scanCountdown !== null 
-                    ? `HOLD STEADY: SCANNING IN ${scanCountdown}S` 
-                    : isScanning 
-                    ? 'PROCESSING PALM VEIN...' 
-                    : cameraState === 'live'
-                    ? 'READY TO SCAN'
-                    : 'CAMERA OFFLINE'}
-                </span>
-              </div>
+              {/* Bottom Controls: Docked at bottom, clean & ergonomic */}
+              <div className="shrink-0 space-y-2 w-full max-w-[640px] mx-auto">
+                {/* Status Guidance Indicator */}
+                <div className="text-center">
+                  <span className={`inline-block px-4 py-1 rounded-full text-xs font-black border-[2px] border-black shadow-[2px_2px_0px_#121212] ${
+                    scanCountdown !== null 
+                      ? 'bg-[#FFDE59] text-black animate-pulse' 
+                      : isScanning 
+                      ? 'bg-[#38BDF8] text-black' 
+                      : cameraState === 'live' 
+                      ? 'bg-[#CCFF00] text-black' 
+                      : 'bg-[#FF4081] text-white'
+                  }`}>
+                    {scanCountdown !== null 
+                      ? `HOLD STEADY: SCANNING IN ${scanCountdown}S` 
+                      : isScanning 
+                      ? 'PROCESSING PALM VEIN...' 
+                      : cameraState === 'live'
+                      ? 'READY TO SCAN'
+                      : 'CAMERA OFFLINE'}
+                  </span>
+                </div>
 
-              {/* Big Scan Button */}
-              <button
-                onClick={handleScanWithCountdown}
-                disabled={isScanning || scanCountdown !== null || cameraState !== 'live' || !modelLoaded}
-                className="w-full py-4 bg-[#FFDE59] text-black border-[3.5px] border-black rounded-2xl shadow-[5px_5px_0px_#121212] font-display font-black text-lg flex items-center justify-center gap-3 neo-btn hover:bg-[#ffe26b] disabled:bg-[#E2E8F0] disabled:text-[#888888] disabled:border-[#888888] disabled:shadow-none disabled:cursor-not-allowed cursor-pointer"
-              >
-                {scanCountdown !== null ? (
-                  <>
-                    <Timer className="w-6 h-6 animate-spin" />
-                    <span>HOLD STEADY: {scanCountdown}s...</span>
-                  </>
-                ) : isScanning ? (
-                  <>
-                    <RefreshCw className="w-6 h-6 animate-spin" />
-                    <span>READING SENSOR...</span>
-                  </>
-                ) : cameraState !== 'live' ? (
-                  <>
-                    <AlertTriangle className="w-5 h-5 text-[#888]" />
-                    <span>CAMERA OFFLINE</span>
-                  </>
-                ) : !modelLoaded ? (
-                  <>
-                    <AlertTriangle className="w-5 h-5 text-[#888]" />
-                    <span>MODEL NOT LOADED</span>
-                  </>
-                ) : (
-                  <>
-                    <Eye className="w-6 h-6 stroke-[3]" />
-                    <span>SCAN PALM NOW</span>
-                  </>
-                )}
-              </button>
-
-              {/* Secondary Action Row: Cancel Scan & Enroll New Palm */}
-              <div className="grid grid-cols-2 gap-3 pt-1">
+                {/* Big Scan Button */}
                 <button
-                  onClick={() => setAppState('idle')}
-                  className="py-3 px-4 bg-white text-black border-[3px] border-black rounded-xl shadow-[3px_3px_0px_#121212] font-display font-black text-xs neo-btn hover:bg-[#f5f5f0] flex items-center justify-center gap-1.5 cursor-pointer"
+                  onClick={handleScanWithCountdown}
+                  disabled={isScanning || scanCountdown !== null || cameraState !== 'live' || !modelLoaded}
+                  className="w-full py-3 bg-[#FFDE59] text-black border-[3px] border-black rounded-2xl shadow-[4px_4px_0px_#121212] font-display font-black text-base flex items-center justify-center gap-2.5 neo-btn hover:bg-[#ffe26b] disabled:bg-[#E2E8F0] disabled:text-[#888888] disabled:border-[#888888] disabled:shadow-none disabled:cursor-not-allowed cursor-pointer"
                 >
-                  <ArrowLeft className="w-4 h-4 stroke-[2.5]" />
-                  <span>CANCEL SCAN</span>
+                  {scanCountdown !== null ? (
+                    <>
+                      <Timer className="w-5 h-5 animate-spin" />
+                      <span>HOLD STEADY: {scanCountdown}s...</span>
+                    </>
+                  ) : isScanning ? (
+                    <>
+                      <RefreshCw className="w-5 h-5 animate-spin" />
+                      <span>READING SENSOR...</span>
+                    </>
+                  ) : cameraState !== 'live' ? (
+                    <>
+                      <AlertTriangle className="w-5 h-5 text-[#888]" />
+                      <span>CAMERA OFFLINE</span>
+                    </>
+                  ) : !modelLoaded ? (
+                    <>
+                      <AlertTriangle className="w-5 h-5 text-[#888]" />
+                      <span>MODEL NOT LOADED</span>
+                    </>
+                  ) : (
+                    <>
+                      <Eye className="w-5 h-5 stroke-[3]" />
+                      <span>SCAN PALM NOW</span>
+                    </>
+                  )}
                 </button>
 
-                <button
-                  onClick={() => setAppState('enroll')}
-                  className="py-3 px-4 bg-[#CCFF00] text-black border-[3px] border-black rounded-xl shadow-[3px_3px_0px_#121212] font-display font-black text-xs neo-btn hover:bg-[#b8e600] flex items-center justify-center gap-1.5 cursor-pointer"
-                >
-                  <UserPlus className="w-4 h-4 stroke-[2.5]" />
-                  <span>ENROLL PALM</span>
-                </button>
+                {/* Secondary Action Row: Cancel Scan & Enroll New Palm */}
+                <div className="grid grid-cols-2 gap-2.5">
+                  <button
+                    onClick={() => setAppState('idle')}
+                    className="py-2.5 px-4 bg-white text-black border-[2.5px] border-black rounded-xl shadow-[2px_2px_0px_#121212] font-display font-black text-xs neo-btn hover:bg-[#f5f5f0] flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <ArrowLeft className="w-4 h-4 stroke-[2.5]" />
+                    <span>CANCEL SCAN</span>
+                  </button>
+
+                  <button
+                    onClick={() => setAppState('enroll')}
+                    className="py-2.5 px-4 bg-[#CCFF00] text-black border-[2.5px] border-black rounded-xl shadow-[2px_2px_0px_#121212] font-display font-black text-xs neo-btn hover:bg-[#b8e600] flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <UserPlus className="w-4 h-4 stroke-[2.5]" />
+                    <span>ENROLL PALM</span>
+                  </button>
+                </div>
               </div>
             </div>
           )}
 
           {/* ══════════════════════════════════════════════════════════════════════
               SCREEN 3: ENROLLMENT (6 GUIDED SAMPLES WITH DYNAMIC INSTRUCTIONS)
-              - Generous camera viewport (nearly same size as scan screen)
+              - Dominant camera viewport filling all available screen space
               - Whole palm visible with object-contain (zero clipping)
               - Dynamic instruction banner directly below camera
               - Ergonomic Admin control row (Username input + Capture button side by side)
@@ -1001,10 +1004,10 @@ export default function App() {
               - Prominent Save Enrollment button when >=3 samples ready
              ══════════════════════════════════════════════════════════════════════ */}
           {appState === 'enroll' && (
-            <div className="flex-1 flex flex-col p-4 sm:p-6 space-y-3 animate-fadeIn overflow-y-auto pb-6 w-full max-w-[800px] mx-auto">
+            <div className="flex-1 flex flex-col p-2.5 sm:p-4 w-full h-full justify-between animate-fadeIn overflow-hidden">
              
               {/* Header: Title + Mode Toggle Buttons */}
-              <div className="flex items-center justify-between border-b-[2px] border-black/10 pb-2">
+              <div className="flex items-center justify-between border-b-[2px] border-black/10 pb-2 shrink-0">
                 <button
                   onClick={() => setAppState('idle')}
                   className="px-3 py-1.5 bg-white border-[2px] border-black rounded-xl text-xs font-black shadow-[2px_2px_0px_#121212] flex items-center gap-1.5 neo-btn cursor-pointer"
@@ -1028,13 +1031,13 @@ export default function App() {
                 </button>
               </div>
 
-              {/* Camera Viewport — SAME LARGE SIZE AS SCAN SECTION */}
-              <div className="w-full relative flex flex-col items-center shrink-0">
+              {/* Camera Viewport — FILLS ALL REMAINING SPACE */}
+              <div className="w-full flex-1 min-h-0 my-2 relative flex items-center justify-center overflow-hidden">
                 <CameraViewport
                   cameraState={cameraState}
                   cameraErrorDetail={cameraErrorDetail}
                   onRetry={loadStatus}
-                  className="w-full h-[580px] sm:h-[640px]"
+                  className="w-full h-full"
                 >
                   {/* Soft Minimal Guide - Fits Either Hand */}
                   <SoftPalmGuide />
@@ -1059,100 +1062,103 @@ export default function App() {
                 </CameraViewport>
               </div>
 
-              {/* ── DYNAMIC INSTRUCTION BANNER (DIRECTLY BELOW CAMERA, CHANGES AFTER EVERY SAMPLE) ── */}
-              <div className="border-[2px] border-black rounded-xl p-2.5 shadow-[2px_2px_0px_#121212] bg-[#FFDE59] text-black">
-                <div className="flex items-center gap-2">
-                  <Info className="w-5 h-5 shrink-0" />
-                  <span className="text-xs font-black leading-tight">
-                    {enrollStatusMsg || ENROLL_SAMPLE_INSTRUCTIONS[enrollSamples.length] || "Calibration complete. Click Save below."}
-                  </span>
-                </div>
-              </div>
-
-              {/* ── ADMIN WORKFLOW CARD: USERNAME INPUT + CAPTURE BUTTON SIDE BY SIDE ── */}
-              <div className="bg-white border-[3px] border-black rounded-2xl p-3 shadow-[3px_3px_0px_#121212] space-y-3">
-                <div className="flex items-end gap-2.5">
-                  <div className="flex-1 space-y-1">
-                    <label className="text-[10px] font-black uppercase tracking-wider text-black">
-                      USERNAME / IDENTIFIER
-                    </label>
-                    <input
-                      type="text"
-                      value={enrollUsername}
-                      onChange={e => setEnrollUsername(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ''))}
-                      placeholder="e.g. user_alpha"
-                      className="w-full px-3 py-2 bg-white border-[2.5px] border-black rounded-xl shadow-[2px_2px_0px_#121212] font-display font-black text-sm outline-none focus:bg-[#FFFDF0]"
-                    />
-                  </div>
-
-                  <button
-                    onClick={handleCaptureSampleWithCountdown}
-                    disabled={isCapturingSample || enrollCountdown !== null || enrollSamples.length >= 6 || !enrollUsername.trim() || cameraState !== 'live' || !modelLoaded}
-                    className={`h-[40px] px-4 border-[2.5px] border-black rounded-xl shadow-[2px_2px_0px_#121212] font-display font-black text-xs flex items-center justify-center gap-2 neo-btn disabled:bg-[#E2E8F0] disabled:text-[#888888] disabled:border-[#888888] disabled:shadow-none disabled:cursor-not-allowed cursor-pointer whitespace-nowrap shrink-0 ${
-                      enrollCountdown !== null ? 'bg-[#FFDE59] text-black animate-pulse' : 'bg-[#38BDF8] text-black hover:bg-[#2cb0eb]'
-                    }`}
-                  >
-                    {enrollCountdown !== null ? (
-                      <>
-                        <Timer className="w-4 h-4 animate-spin" />
-                        <span>CAPTURING: {enrollCountdown}s</span>
-                      </>
-                    ) : isCapturingSample ? (
-                      <>
-                        <RefreshCw className="w-4 h-4 animate-spin" />
-                        <span>PROCESSING...</span>
-                      </>
-                    ) : (
-                      <>
-                        <Camera className="w-4 h-4 stroke-[2.5]" />
-                        <span>CAPTURE #{enrollSamples.length + 1}</span>
-                      </>
-                    )}
-                  </button>
-                </div>
-
-                {/* 6-Cell Sample Matrix Grid */}
-                <div className="space-y-1.5 pt-1 border-t-[1.5px] border-black/10">
-                  <div className="flex justify-between items-center text-[11px] font-black">
-                    <span className="uppercase tracking-wider">CALIBRATION PROGRESS:</span>
-                    <span className="px-2 py-0.5 bg-[#38BDF8] border-[1.5px] border-black rounded-full text-[10px]">
-                      {enrollSamples.length} / 6 SAMPLES {enrollSamples.length >= 3 ? '(READY TO SAVE)' : ''}
+              {/* Bottom Controls: Compact & Docked at Bottom */}
+              <div className="shrink-0 space-y-2 w-full max-w-[640px] mx-auto">
+                {/* ── DYNAMIC INSTRUCTION BANNER ── */}
+                <div className="border-[2px] border-black rounded-xl p-2 shadow-[2px_2px_0px_#121212] bg-[#FFDE59] text-black">
+                  <div className="flex items-center gap-2">
+                    <Info className="w-4 h-4 shrink-0" />
+                    <span className="text-xs font-black leading-tight">
+                      {enrollStatusMsg || ENROLL_SAMPLE_INSTRUCTIONS[enrollSamples.length] || "Calibration complete. Click Save below."}
                     </span>
                   </div>
-
-                  <div className="grid grid-cols-6 gap-1.5">
-                    {[0, 1, 2, 3, 4, 5].map(idx => {
-                      const sample = enrollSamples[idx];
-                      const isDone = !!sample;
-                      return (
-                        <div
-                          key={idx}
-                          className={`h-10 rounded-xl border-[2px] border-black shadow-[2px_2px_0px_#121212] flex items-center justify-center font-display font-black text-xs transition-all overflow-hidden ${
-                            isDone ? 'bg-[#CCFF00] scale-105' : idx < 3 ? 'bg-[#FFFDE8] text-[#888]' : 'bg-[#F4F4F0] text-[#aaa]'
-                          }`}>
-                          {isDone && sample.thumb ? (
-                            <img src={`data:image/png;base64,${sample.thumb}`} alt={`Sample ${idx+1}`} className="w-full h-full object-cover" />
-                          ) : isDone ? (
-                            '✓'
-                          ) : (
-                            `#${idx + 1}`
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
                 </div>
 
-                {/* Save & Commit Button */}
-                {enrollSamples.length >= 3 && (
-                  <button
-                    onClick={handleSaveEnrollment}
-                    className="w-full py-3 bg-[#CCFF00] text-black border-[3px] border-black rounded-xl shadow-[3px_3px_0px_#121212] font-display font-black text-sm flex items-center justify-center gap-2 neo-btn hover:bg-[#b8e600] animate-bounce cursor-pointer"
-                  >
-                    <Check className="w-5 h-5 stroke-[3]" />
-                    <span>SAVE ENROLLMENT ({enrollSamples.length} SAMPLES)</span>
-                  </button>
-                )}
+                {/* ── ADMIN WORKFLOW CARD: USERNAME INPUT + CAPTURE BUTTON SIDE BY SIDE ── */}
+                <div className="bg-white border-[2.5px] border-black rounded-2xl p-2.5 shadow-[3px_3px_0px_#121212] space-y-2">
+                  <div className="flex items-end gap-2">
+                    <div className="flex-1 space-y-0.5">
+                      <label className="text-[10px] font-black uppercase tracking-wider text-black">
+                        USERNAME / IDENTIFIER
+                      </label>
+                      <input
+                        type="text"
+                        value={enrollUsername}
+                        onChange={e => setEnrollUsername(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ''))}
+                        placeholder="e.g. user_alpha"
+                        className="w-full px-3 py-1.5 bg-white border-[2px] border-black rounded-xl shadow-[2px_2px_0px_#121212] font-display font-black text-sm outline-none focus:bg-[#FFFDF0]"
+                      />
+                    </div>
+
+                    <button
+                      onClick={handleCaptureSampleWithCountdown}
+                      disabled={isCapturingSample || enrollCountdown !== null || enrollSamples.length >= 6 || !enrollUsername.trim() || cameraState !== 'live' || !modelLoaded}
+                      className={`h-[38px] px-3.5 border-[2px] border-black rounded-xl shadow-[2px_2px_0px_#121212] font-display font-black text-xs flex items-center justify-center gap-1.5 neo-btn disabled:bg-[#E2E8F0] disabled:text-[#888888] disabled:border-[#888888] disabled:shadow-none disabled:cursor-not-allowed cursor-pointer whitespace-nowrap shrink-0 ${
+                        enrollCountdown !== null ? 'bg-[#FFDE59] text-black animate-pulse' : 'bg-[#38BDF8] text-black hover:bg-[#2cb0eb]'
+                      }`}
+                    >
+                      {enrollCountdown !== null ? (
+                        <>
+                          <Timer className="w-3.5 h-3.5 animate-spin" />
+                          <span>CAPTURING: {enrollCountdown}s</span>
+                        </>
+                      ) : isCapturingSample ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          <span>PROCESSING...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Camera className="w-3.5 h-3.5 stroke-[2.5]" />
+                          <span>CAPTURE #{enrollSamples.length + 1}</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+
+                  {/* 6-Cell Sample Matrix Grid */}
+                  <div className="space-y-1 pt-1 border-t-[1.5px] border-black/10">
+                    <div className="flex justify-between items-center text-[10px] font-black">
+                      <span className="uppercase tracking-wider">CALIBRATION PROGRESS:</span>
+                      <span className="px-2 py-0.5 bg-[#38BDF8] border-[1.5px] border-black rounded-full text-[9px]">
+                        {enrollSamples.length} / 6 SAMPLES {enrollSamples.length >= 3 ? '(READY TO SAVE)' : ''}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-6 gap-1">
+                      {[0, 1, 2, 3, 4, 5].map(idx => {
+                        const sample = enrollSamples[idx];
+                        const isDone = !!sample;
+                        return (
+                          <div
+                            key={idx}
+                            className={`h-8 rounded-lg border-[1.5px] border-black shadow-[1.5px_1.5px_0px_#121212] flex items-center justify-center font-display font-black text-[11px] transition-all overflow-hidden ${
+                              isDone ? 'bg-[#CCFF00] scale-105' : idx < 3 ? 'bg-[#FFFDF0] text-[#888]' : 'bg-[#F4F4F0] text-[#aaa]'
+                            }`}>
+                            {isDone && sample.thumb ? (
+                              <img src={`data:image/png;base64,${sample.thumb}`} alt={`Sample ${idx+1}`} className="w-full h-full object-cover" />
+                            ) : isDone ? (
+                              '✓'
+                            ) : (
+                              `#${idx + 1}`
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Save & Commit Button */}
+                  {enrollSamples.length >= 3 && (
+                    <button
+                      onClick={handleSaveEnrollment}
+                      className="w-full py-2.5 bg-[#CCFF00] text-black border-[2px] border-black rounded-xl shadow-[3px_3px_0px_#121212] font-display font-black text-xs flex items-center justify-center gap-1.5 neo-btn hover:bg-[#b8e600] animate-bounce cursor-pointer mt-1"
+                    >
+                      <Check className="w-4 h-4 stroke-[3]" />
+                      <span>SAVE ENROLLMENT ({enrollSamples.length} SAMPLES READY)</span>
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           )}
