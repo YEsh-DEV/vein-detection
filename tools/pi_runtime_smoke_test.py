@@ -134,13 +134,17 @@ class RuntimeSmokeTester:
             from picamera2 import Picamera2
             self.log_result("Picamera2 Hardware Driver", "PASS", "Available (installed via apt)")
         except Exception as e:
-            # Picamera2 is Pi-specific; if on desktop, report INFO
             if platform.machine() in ("aarch64", "arm64") and "linux" in sys.platform:
-                self.log_result("Picamera2 Hardware Driver", "WARN",
-                                f"Unavailable ({e}). Run: sudo apt install -y python3-picamera2")
+                self.log_result(
+                    "Picamera2 Hardware Driver", "FAIL",
+                    f"Unavailable ({e}). Picamera2 is not accessible in this venv. "
+                    "Recreate venv with: python3 -m venv --system-site-packages .venv"
+                )
             else:
-                self.log_result("Picamera2 Hardware Driver", "INFO",
-                                "Not available on non-Pi host (OpenCV V4L2 fallback active)")
+                self.log_result(
+                    "Picamera2 Hardware Driver", "INFO",
+                    "Not available on non-Pi host (Picamera2 required on physical Raspberry Pi)"
+                )
 
     def test_onnxruntime(self):
         try:
@@ -218,7 +222,7 @@ class RuntimeSmokeTester:
         cap = None
         cam_type = None
 
-        # Try Picamera2
+        # Picamera2 is the primary and required hardware camera path
         try:
             from picamera2 import Picamera2
             p = Picamera2()
@@ -228,25 +232,15 @@ class RuntimeSmokeTester:
             frame_rgb = p.capture_array("main")
             p.stop()
             frame = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-            cam_type = "Picamera2 (CSI)"
+            cam_type = "REAL_PICAMERA2 (CSI)"
             self.log_result("Live Frame Acquisition", "PASS", f"Captured 640x480 via {cam_type}")
         except Exception as e:
-            # Fall back to OpenCV VideoCapture
-            for idx in range(4):
-                c = cv2.VideoCapture(idx)
-                if c.isOpened():
-                    ret, test_frame = c.read()
-                    c.release()
-                    if ret and test_frame is not None:
-                        frame = test_frame
-                        cam_type = f"OpenCV (/dev/video{idx})"
-                        self.log_result("Live Frame Acquisition", "PASS",
-                                        f"Captured {frame.shape[1]}x{frame.shape[0]} via {cam_type}")
-                        break
-            else:
-                self.log_result("Live Frame Acquisition", "FAIL",
-                                "No live camera frame could be captured")
-                return
+            self.log_result(
+                "Live Frame Acquisition", "FAIL",
+                f"Picamera2 hardware camera not available ({e}). "
+                "Hardware camera test failed — Picamera2 is required on Raspberry Pi."
+            )
+            return
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         laplacian_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())

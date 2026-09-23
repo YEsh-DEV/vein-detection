@@ -2,34 +2,27 @@
 """
 tools/pi_camera_diagnostic.py — Comprehensive Camera & Capture Diagnostic Tool
 =============================================================================
-Designed to RUN MANUALLY ON RASPBERRY PI 5 (with native Picamera2 or OpenCV V4L2).
-Also runnable on laptop via synthetic mock frame mode (--mock or automatic fallback).
+Designed to RUN MANUALLY ON RASPBERRY PI 5 (with native Picamera2).
+Primary camera path: Picamera2 / libcamera.
 
-Audit Capabilities:
-1. Camera Hardware & Control Inspection:
-   - Picamera2 properties, camera model (e.g. OV5647 5MP), sensor modes.
-   - Active controls (AeEnable, ExposureTime, AnalogueGain, FrameDurationLimits).
-   - Lens type audit (detects manual focus vs VCM autofocus if any).
-2. Optical & Frame Signal Analysis:
-   - Active capture resolution (width x height).
-   - Mean intensity (detects underexposure / dim NIR).
-   - Standard deviation (vascular contrast).
-   - Min / Max pixel values & IR LED saturation percentage (detects blown-out center).
-   - Laplacian variance sharpness score (detects optical defocus vs in-focus).
-3. Algorithmic Pipeline Stages:
-   - Phase 2: Otsu-based pre-landmark positioning heuristic (occupancy, borders, HAND_TOO_CLOSE).
-   - Phase 2: MediaPipe 21-joint skeletal landmark detection.
-   - Phase 3: Knuckle valley localization (V1, V2, V3) and coordinate stability.
-   - Phase 3: Scaled 224x224 ROI extraction and boundary padding validation.
-   - Phase 4: AMPVNet ONNX 512-D embedding extraction smoke test.
-4. Actionable Operator Recommendations:
-   - Physical focus adjustment guidance (3.6mm lens barrel manual rotation).
-   - Distance and lighting recommendations.
+Rules:
+1. Picamera2 is the PRIMARY camera path.
+2. Synthetic fallback is NEVER reported as a successful hardware test.
+3. If Picamera2 is unavailable on hardware, reports:
+       HARDWARE CAMERA TEST NOT AVAILABLE
+   and exits with code 1.
+4. Synthetic fallback is ONLY available under an explicit flag: --synthetic.
+5. The output clearly identifies the frame source:
+       REAL_PICAMERA2
+       V4L2
+       SYNTHETIC
+6. Optical focus / sharpness is NEVER reported as a hardware result when using synthetic data.
 
 Usage:
     python3 tools/pi_camera_diagnostic.py
-    python3 tools/pi_camera_diagnostic.py --mock
     python3 tools/pi_camera_diagnostic.py --save-frame diag_capture.png
+    python3 tools/pi_camera_diagnostic.py --synthetic   # Laptop simulation mode
+    python3 tools/pi_camera_diagnostic.py --v4l2        # Explicit USB V4L2 fallback
 """
 
 import os
@@ -41,13 +34,12 @@ from pathlib import Path
 # Suppress noisy OpenCV probe logs
 os.environ["OPENCV_LOG_LEVEL"] = "OFF"
 
-import numpy as np
-import cv2
-
-# Project root setup
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
+
+import numpy as np
+import cv2
 
 # Safe imports from app
 try:
@@ -128,51 +120,6 @@ def probe_opencv_cameras(max_devices: int = 4):
     return devices
 
 
-def capture_diagnostic_frame(picam2_info, force_mock: bool = False, exposure_us: int = 5000, gain: float = 1.0):
-    """Captures a frame via Picamera2, OpenCV, or synthetic mock."""
-    if force_mock:
-        return create_synthetic_frame(), "MOCK_SYNTHETIC", {"exposure_us": 0, "gain": 0}
-
-    # 1. Picamera2
-    if picam2_info.get("available") and picam2_info.get("instance") is not None:
-        p = picam2_info["instance"]
-        try:
-            cfg = p.create_preview_configuration(main={"size": (640, 480), "format": "RGB888"})
-            p.configure(cfg)
-            p.start()
-            p.set_controls({
-                "AeEnable": False,
-                "ExposureTime": exposure_us,
-                "AnalogueGain": gain,
-            })
-            # Discard first 2 frames to allow AGC/settling
-            for _ in range(2):
-                p.capture_array("main")
-            frame_rgb = p.capture_array("main")
-            p.stop()
-            frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-            return frame_bgr, "PICAMERA2", {"exposure_us": exposure_us, "gain": gain}
-        except Exception as e:
-            print(f"  [!] Picamera2 capture failed: {e}")
-
-    # 2. OpenCV
-    for idx in range(4):
-        cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
-        if not cap.isOpened():
-            cap = cv2.VideoCapture(idx)
-        if cap.isOpened():
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            ret, frame = cap.read()
-            cap.release()
-            if ret and frame is not None and frame.size > 0:
-                return frame, f"OPENCV_VIDEO_{idx}", {"exposure_us": "Auto", "gain": "Auto"}
-
-    # 3. Fallback
-    print("  [*] No live camera detected. Using synthetic NIR hand frame for algorithm validation.")
-    return create_synthetic_frame(), "SYNTHETIC_FALLBACK", {"exposure_us": 0, "gain": 0}
-
-
 def create_synthetic_frame():
     """Generates an anatomically structured synthetic palm for testing without physical camera."""
     frame = np.full((480, 640), 30, dtype=np.uint8)
@@ -192,6 +139,61 @@ def create_synthetic_frame():
         cv2.polylines(frame, [np.array(pts, dtype=np.int32)], False, 90, 3)
     frame_bgr = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
     return frame_bgr
+
+
+def capture_diagnostic_frame(picam2_info, args):
+    """
+    Captures a frame adhering to strict hardware rules:
+    - Primary: REAL_PICAMERA2
+    - Explicit secondary: V4L2 (if --v4l2 specified)
+    - Explicit simulation: SYNTHETIC (if --synthetic or --mock specified)
+    - If hardware unavailable and no synthetic flag: returns None, None, metadata
+    """
+    exposure_us = args.exposure_us
+    gain = args.gain
+
+    # 1. Explicit synthetic flag
+    if args.synthetic:
+        return create_synthetic_frame(), "SYNTHETIC", {"exposure_us": 0, "gain": 0}
+
+    # 2. Primary: Picamera2
+    if picam2_info.get("available") and picam2_info.get("instance") is not None:
+        p = picam2_info["instance"]
+        try:
+            cfg = p.create_preview_configuration(main={"size": (640, 480), "format": "RGB888"})
+            p.configure(cfg)
+            p.start()
+            p.set_controls({
+                "AeEnable": False,
+                "ExposureTime": exposure_us,
+                "AnalogueGain": gain,
+            })
+            # Discard first 2 frames to allow AGC/settling
+            for _ in range(2):
+                p.capture_array("main")
+            frame_rgb = p.capture_array("main")
+            p.stop()
+            frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+            return frame_bgr, "REAL_PICAMERA2", {"exposure_us": exposure_us, "gain": gain}
+        except Exception as e:
+            return None, None, {"error": f"Picamera2 capture error: {e}"}
+
+    # 3. Explicit V4L2 fallback (only if user requested --v4l2)
+    if args.v4l2:
+        for idx in range(4):
+            cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
+            if not cap.isOpened():
+                cap = cv2.VideoCapture(idx)
+            if cap.isOpened():
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                ret, frame = cap.read()
+                cap.release()
+                if ret and frame is not None and frame.size > 0:
+                    return frame, "V4L2", {"exposure_us": "Auto", "gain": "Auto", "device": f"/dev/video{idx}"}
+
+    # 4. Hardware not available
+    return None, None, {"error": picam2_info.get("error", "Picamera2 driver not available in active environment")}
 
 
 def analyze_frame_signal(gray: np.ndarray):
@@ -244,58 +246,70 @@ def run_diagnostics(args):
         for m in picam2_info["sensor_modes"]:
             print(f"        * Mode: {m}")
     else:
-        print_status("Picamera2 Native Driver", "WARN",
-                     f"Not available ({picam2_info.get('error', 'None')})")
-
-    cv_devs = probe_opencv_cameras()
-    if cv_devs:
-        print_status("OpenCV V4L2 Device Nodes", "PASS", f"Found {len(cv_devs)} device(s)")
-        for d in cv_devs:
-            print(f"     -> /dev/video{d['index']}: {d['width']}x{d['height']} @ {d['fps']}fps (backend: {d['backend']})")
-    else:
-        print_status("OpenCV V4L2 Device Nodes", "WARN", "No /dev/video* devices opened successfully")
+        print_status("Picamera2 Native Driver", "FAIL",
+                     f"Unavailable ({picam2_info.get('error', 'Unknown')})")
 
     # =========================================================================
     # 2. CAPTURE & OPTICAL SIGNAL AUDIT
     # =========================================================================
     print_header("2. LIVE CAPTURE & OPTICAL SIGNAL AUDIT")
-    frame_bgr, source, capture_meta = capture_diagnostic_frame(
-        picam2_info, force_mock=args.mock, exposure_us=args.exposure_us, gain=args.gain
-    )
+    frame_bgr, source, capture_meta = capture_diagnostic_frame(picam2_info, args)
+
+    if frame_bgr is None:
+        print_header("HARDWARE CAMERA TEST NOT AVAILABLE")
+        print("\033[91m[✗ FAIL] Picamera2 hardware driver is not available in the active environment.\033[0m")
+        print(f"  Error Detail: {capture_meta.get('error')}\n")
+        print("  Action items for Raspberry Pi:")
+        print("    1. Verify system packages are installed on Pi OS:")
+        print("       sudo apt update && sudo apt install -y python3-picamera2 python3-libcamera")
+        print("    2. Recreate your virtual environment WITH '--system-site-packages':")
+        print("       python3 -m venv --system-site-packages .venv")
+        print("       source .venv/bin/activate")
+        print("    3. Test camera hardware detection directly:")
+        print("       rpicam-hello --list-cameras")
+        print("\n  (If running tests on a laptop without physical hardware, run: python3 tools/pi_camera_diagnostic.py --synthetic)")
+        print("=" * 70 + "\n")
+        return 1
+
     gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
     h, w = gray.shape
 
     print_status("Frame Source", "INFO", f"{source} (Resolution: {w}x{h})")
-    print_status("Exposure Setting", "INFO", f"Exposure: {capture_meta['exposure_us']} µs | Gain: {capture_meta['gain']}")
+    print_status("Exposure Setting", "INFO", f"Exposure: {capture_meta.get('exposure_us')} µs | Gain: {capture_meta.get('gain')}")
 
     stats = analyze_frame_signal(gray)
     print(f"\n  Signal Statistics:")
     print(f"    - Mean Intensity         : {stats['mean']:<6} (Target: 50.0 - 150.0)")
     print(f"    - Contrast (Std Dev)     : {stats['std']:<6} (Target: >= 14.0)")
     print(f"    - Dynamic Range          : [{stats['min']}, {stats['max']}]")
-    print(f"    - IR Saturation (>=250)  : {stats['sat_pct']}% (Target: < 3.0%)")
-    print(f"    - Pure Black (<=5)       : {stats['black_pct']}%")
-    print(f"    - Sharpness (Laplacian)  : {stats['sharpness']:<6} (Target: > 45.0)")
 
-    # Signal evaluations
-    if 40.0 <= stats["mean"] <= 170.0:
-        print_status("Illumination / Brightness", "PASS", f"Optimal ({stats['mean']})")
-    elif stats["mean"] < 40.0:
-        print_status("Illumination / Brightness", "WARN", f"Underexposed ({stats['mean']} < 40.0). Increase exposure or IR power.")
+    if source == "SYNTHETIC":
+        print_status("Optical Sharpness", "INFO",
+                     "N/A (SYNTHETIC FRAME - Cannot evaluate optical focus of synthetic pixels)")
+        print_status("IR Center Saturation", "INFO",
+                     "N/A (SYNTHETIC FRAME - Simulated lighting)")
     else:
-        print_status("Illumination / Brightness", "WARN", f"Overexposed ({stats['mean']} > 170.0). Reduce gain or exposure.")
+        print(f"    - IR Saturation (>=250)  : {stats['sat_pct']}% (Target: < 3.0%)")
+        print(f"    - Sharpness (Laplacian)  : {stats['sharpness']:<6} (Target: > 45.0)")
 
-    if stats["sat_pct"] > 5.0:
-        print_status("IR Center Saturation", "FAIL", f"{stats['sat_pct']}% saturated! Hand too close to IR LEDs or gain too high.")
-    else:
-        print_status("IR Center Saturation", "PASS", f"Controlled ({stats['sat_pct']}%)")
+        if 40.0 <= stats["mean"] <= 170.0:
+            print_status("Illumination / Brightness", "PASS", f"Optimal ({stats['mean']})")
+        elif stats["mean"] < 40.0:
+            print_status("Illumination / Brightness", "WARN", f"Underexposed ({stats['mean']}). Increase exposure or IR power.")
+        else:
+            print_status("Illumination / Brightness", "WARN", f"Overexposed ({stats['mean']}). Reduce gain or exposure.")
 
-    if stats["sharpness"] >= 45.0:
-        print_status("Optical Sharpness", "PASS", f"Score: {stats['sharpness']:.1f} (In focus)")
-    elif stats["sharpness"] >= 20.0:
-        print_status("Optical Sharpness", "WARN", f"Score: {stats['sharpness']:.1f} (Soft focus / slight blur)")
-    else:
-        print_status("Optical Sharpness", "FAIL", f"Score: {stats['sharpness']:.1f} (Severely blurred — rotate manual focus ring)")
+        if stats["sat_pct"] > 5.0:
+            print_status("IR Center Saturation", "FAIL", f"{stats['sat_pct']}% saturated! Hand too close to IR LEDs or gain too high.")
+        else:
+            print_status("IR Center Saturation", "PASS", f"Controlled ({stats['sat_pct']}%)")
+
+        if stats["sharpness"] >= 45.0:
+            print_status("Optical Sharpness", "PASS", f"Score: {stats['sharpness']:.1f} (In focus)")
+        elif stats["sharpness"] >= 20.0:
+            print_status("Optical Sharpness", "WARN", f"Score: {stats['sharpness']:.1f} (Soft focus / slight blur)")
+        else:
+            print_status("Optical Sharpness", "FAIL", f"Score: {stats['sharpness']:.1f} (Severely blurred — rotate manual focus ring)")
 
     # =========================================================================
     # 3. PHASE 2: HAND POSITIONING & OCCUPANCY HEURISTIC
@@ -358,7 +372,6 @@ def run_diagnostics(args):
         engine = AMPVNetInference()
         if engine.model_loaded:
             print_status("AMPVNet ONNX Engine", "PASS", f"Loaded model from {engine.model_path}")
-            # Test synthetic 224x224 inference
             test_patch = np.full((224, 224), 128, dtype=np.uint8)
             emb = engine.extract_embedding(test_patch)
             norm = float(np.linalg.norm(emb))
@@ -372,56 +385,68 @@ def run_diagnostics(args):
         print_status("AMPVNet ONNX Engine", "FAIL", f"Inference check error: {e}")
 
     # =========================================================================
-    # 6. ACTIONABLE RECOMMENDATIONS FOR THE OPERATOR
+    # 6. ACTIONABLE OPERATOR RECOMMENDATIONS
     # =========================================================================
     print_header("6. ACTIONABLE OPERATOR RECOMMENDATIONS")
     recommendations = []
 
-    if stats["sharpness"] < 45.0:
-        recommendations.append(
-            "[FOCUS] Camera appears soft or defocused. The 3.6mm lens has a screw-threaded barrel.\n"
-            "        * Loosen the knurled locking ring slightly if locked.\n"
-            "        * Place a printed test chart or palm flat at exactly 12 cm from the lens.\n"
-            "        * Rotate the lens barrel counter-clockwise by 1/4 to 1/2 turn to shift focal plane from infinity to macro.\n"
-            "        * Re-run this diagnostic until sharpness exceeds 45.0."
-        )
-
-    if stats["sat_pct"] > 3.0:
-        recommendations.append(
-            "[EXPOSURE / IR] Overexposure or IR blowout detected in center of frame.\n"
-            "        * Ensure the palm is held at 12-15 cm, not closer than 10 cm.\n"
-            "        * In tools/collect_hardware_dataset.py or app/server.py, lock exposure to 4000µs - 5000µs with gain 1.0."
-        )
-
-    if diag["reason"] == "HAND_TOO_CLOSE":
-        recommendations.append(
-            "[DISTANCE] Hand is occupying >50% of the frame and clipping border margins.\n"
-            "        * Mount a physical spacer / standoff ring or mark at 12-15 cm above the lens.\n"
-            "        * Instruct users to keep fingers within the outer framing guides."
-        )
-
-    if not recommendations:
-        print("  \033[92m[✓] All diagnostic checks passed! Optical signal, positioning, and inference are optimal.\033[0m")
+    if source == "SYNTHETIC":
+        print("  \033[94m[INFO] SYNTHETIC SIMULATION COMPLETE: Algorithmic pipeline executed on synthetic pixels.\033[0m")
+        print("  To perform physical optical calibration and camera verification, run without --synthetic on Raspberry Pi.")
     else:
-        for r in recommendations:
-            print(f"  {r}\n")
+        if stats["sharpness"] < 45.0:
+            recommendations.append(
+                "[FOCUS] Camera appears soft or defocused. The 3.6mm lens has a screw-threaded barrel.\n"
+                "        * Loosen the knurled locking ring slightly if locked.\n"
+                "        * Place a printed test chart or palm flat at exactly 12 cm from the lens.\n"
+                "        * Rotate the lens barrel counter-clockwise by 1/4 to 1/2 turn to shift focal plane from infinity to macro.\n"
+                "        * Re-run this diagnostic until sharpness exceeds 45.0."
+            )
+
+        if stats["sat_pct"] > 3.0:
+            recommendations.append(
+                "[EXPOSURE / IR] Overexposure or IR blowout detected in center of frame.\n"
+                "        * Ensure the palm is held at 12-15 cm, not closer than 10 cm.\n"
+                "        * In tools/collect_hardware_dataset.py or app/server.py, lock exposure to 4000µs - 5000µs with gain 1.0."
+            )
+
+        if diag["reason"] == "HAND_TOO_CLOSE":
+            recommendations.append(
+                "[DISTANCE] Hand is occupying >50% of the frame and clipping border margins.\n"
+                "        * Mount a physical spacer / standoff ring or mark at 12-15 cm above the lens.\n"
+                "        * Instruct users to keep fingers within the outer framing guides."
+            )
+
+        if not recommendations:
+            print("  \033[92m[✓] All diagnostic checks passed! Optical signal, positioning, and inference are optimal.\033[0m")
+        else:
+            for r in recommendations:
+                print(f"  {r}\n")
 
     # Optional frame save
-    if args.save_frame:
+    if args.save_frame and frame_bgr is not None:
         save_path = Path(args.save_frame)
         save_path.parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(save_path), frame_bgr)
         print(f"\n[+] Saved diagnostic frame to: {save_path.resolve()}")
 
     print("=" * 70 + "\n")
+    return 0
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Raspberry Pi Camera & Capture Diagnostic")
-    parser.add_argument("--mock", action="store_true", help="Force synthetic mock frame (for laptop testing)")
-    parser.add_argument("--exposure-us", type=int, default=5000, help="Shutter exposure in microseconds (default: 5000)")
-    parser.add_argument("--gain", type=float, default=1.0, help="Analogue gain (default: 1.0)")
-    parser.add_argument("--save-frame", type=str, default="", help="Path to save captured diagnostic frame")
+    parser.add_argument("--synthetic", "--mock", dest="synthetic", action="store_true",
+                        help="Run in synthetic simulation mode (for laptop testing without physical camera)")
+    parser.add_argument("--v4l2", action="store_true",
+                        help="Allow secondary USB V4L2 webcam probe if Picamera2 is unavailable")
+    parser.add_argument("--exposure-us", type=int, default=5000,
+                        help="Shutter exposure in microseconds (default: 5000)")
+    parser.add_argument("--gain", type=float, default=1.0,
+                        help="Analogue gain (default: 1.0)")
+    parser.add_argument("--save-frame", type=str, default="",
+                        help="Path to save captured diagnostic frame")
     args = parser.parse_args()
 
-    run_diagnostics(args)
+    exit_code = run_diagnostics(args)
+    sys.exit(exit_code)

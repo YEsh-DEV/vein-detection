@@ -12,7 +12,8 @@
 
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
-numpy>=1.26.0,<2.0.0
+# NumPy: Supports 1.26+ (Python 3.10-3.12) and 2.1+ / 2.5+ (Python 3.13 on aarch64)
+numpy>=1.26.0
 opencv-python>=4.10.0
 mediapipe>=0.10.0
 pillow>=10.0.0

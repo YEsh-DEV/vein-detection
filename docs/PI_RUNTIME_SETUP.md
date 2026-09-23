@@ -16,13 +16,13 @@ The AMPVNet ONNX biometric inference engine requires a **64-bit ARM architecture
 # 1. Check OS architecture (MUST report 'aarch64')
 uname -m
 
-# 2. Check Python version (Python 3.10, 3.11, or 3.12 supported)
+# 2. Check Python version (Python 3.10, 3.11, 3.12, or 3.13 supported)
 python3 --version
 ```
 
 *Expected output:*
 * `uname -m` $\rightarrow$ `aarch64` *(If it outputs `armv7l`, you have a 32-bit OS installed and must reflash with 64-bit Raspberry Pi OS).*
-* `python3 --version` $\rightarrow$ `Python 3.11.x` or `Python 3.12.x`.
+* `python3 --version` $\rightarrow$ `Python 3.11.x`, `Python 3.12.x`, or `Python 3.13.x`.
 
 ---
 
@@ -46,14 +46,16 @@ sudo apt install -y python3-picamera2 python3-libcamera python3-opencv python3-p
 # RUN MANUALLY ON RASPBERRY PI
 cd ~/vein-detection  # (or your repo directory)
 
-# Create venv with access to system Picamera2
+# If an isolated venv was already created without system-site-packages, recreate it:
+deactivate 2>/dev/null
+rm -rf .venv
 python3 -m venv --system-site-packages .venv
 
 # Activate the virtual environment
 source .venv/bin/activate
 
-# Verify venv is active
-which python3
+# Verify that picamera2 is now visible inside the venv:
+python3 -c "import picamera2; print('[+] Picamera2 is successfully imported inside venv!')"
 ```
 
 ---

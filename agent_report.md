@@ -731,8 +731,8 @@ When running the full test suite on Raspberry Pi OS Bookworm via `python3 -m uni
 ### 14.2 Clean Three-Tier Dependency Decoupling
 To eliminate dependency pollution, dependencies are now strictly segregated into three non-overlapping tiers:
 * **Tier A — Raspberry Pi Runtime (`requirements.txt`):**
-  `fastapi`, `uvicorn[standard]`, `numpy>=1.26.0,<2.0.0`, `opencv-python`, `mediapipe`, `pillow`, `onnxruntime`, `scipy`.
-  *Note:* On Raspberry Pi OS Bookworm, `picamera2` and `python3-opencv` are installed via system APT (`sudo apt install -y python3-picamera2 python3-opencv`), and accessed in Python via a venv created with `--system-site-packages`.
+  `fastapi`, `uvicorn[standard]`, `numpy>=1.26.0` (fully supporting Python 3.13 and NumPy 2.x without `<2.0.0` restriction), `opencv-python`, `mediapipe`, `pillow`, `onnxruntime`, `scipy`.
+  *Note:* On Raspberry Pi OS Bookworm with Python 3.13, `picamera2` is installed via system APT (`sudo apt install -y python3-picamera2`), and accessed in Python via a venv created with `--system-site-packages`.
 * **Tier B — Development & Test Suite (`requirements-dev.txt`):**
   Extends Tier A with `httpx>=0.27.0` and `pytest>=8.0.0` for running FastAPI endpoint integration tests.
 * **Tier C — Offline GPU Training (`training/requirements-training.txt`):**
@@ -750,6 +750,6 @@ To eliminate dependency pollution, dependencies are now strictly segregated into
 * Running `python3 -m unittest discover -s tests -p "test_*.py" -v` on an edge device without PyTorch or httpx now cleanly executes and passes all 17 core unit and integration tests (`Ran 17 tests in 0.11s. OK (skipped=3)`). In a full dev environment with all dependencies, all 26 tests pass (`Ran 26 tests in 0.78s. OK`).
 
 ### 14.5 New Hardware Diagnostic & Smoke-Test Utilities
-1. **`tools/pi_runtime_smoke_test.py`:** Standalone Pi verification script testing Python version, 64-bit architecture, OpenCV, NumPy, MediaPipe, Picamera2, ONNX Runtime, `CPUExecutionProvider`, model existence, model loading, 512-D embedding extraction, and strict L2 unit normalization. Supports `--camera` flag for live frame capture testing.
-2. **`tools/pi_camera_diagnostic.py`:** Comprehensive hardware camera diagnostic reporting Picamera2 controls, sensor modes, resolution, signal statistics (mean, std, min, max, IR saturation %, Laplacian sharpness variance), pre-landmark positioning heuristic, and MediaPipe landmarking.
+1. **`tools/pi_runtime_smoke_test.py`:** Standalone Pi verification script testing Python version (3.10-3.13), 64-bit architecture, OpenCV, NumPy (1.26+ or 2.x), MediaPipe, Picamera2, ONNX Runtime, `CPUExecutionProvider`, model existence, model loading, 512-D embedding extraction, and strict L2 unit normalization. The `--camera` flag enforces Picamera2 as the required primary hardware camera and fails if missing.
+2. **`tools/pi_camera_diagnostic.py`:** Comprehensive hardware camera diagnostic reporting Picamera2 controls, sensor modes, resolution, signal statistics (mean, std, min, max, IR saturation %, Laplacian sharpness variance), pre-landmark positioning heuristic, and MediaPipe landmarking. Enforces Picamera2 as primary hardware path; synthetic simulation is strictly gated behind `--synthetic` and never reports simulated pixels as physical optical calibration.
 3. **`docs/PI_RUNTIME_SETUP.md`:** Complete step-by-step terminal deployment guide for Raspberry Pi OS Bookworm with exact manual commands.
