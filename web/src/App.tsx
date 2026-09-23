@@ -19,7 +19,8 @@ import {
   Scan,
   Hand,
   Sparkles,
-  Trash2
+  Trash2,
+  RotateCw
 } from 'lucide-react';
 
 type AppState = 'idle' | 'scan' | 'enroll';
@@ -603,14 +604,51 @@ export default function App() {
     }
   };
 
+  // ── Kiosk Display Rotation (90° Portrait Tilt requested for Raspberry Pi) ──
+  const [rotation, setRotation] = useState<number>(() => {
+    const saved = localStorage.getItem('kiosk_rotation');
+    return saved !== null ? parseInt(saved, 10) : 90;
+  });
+
+  const cycleRotation = () => {
+    setRotation(prev => {
+      const next = (prev + 90) % 360;
+      localStorage.setItem('kiosk_rotation', next.toString());
+      return next;
+    });
+  };
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.key === 'r' || e.key === 'R') && !e.ctrlKey && !e.metaKey && !(e.target instanceof HTMLInputElement)) {
+        cycleRotation();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  const isRotated = rotation === 90 || rotation === 270;
+
   return (
     <ErrorBoundary>
-      <div className="min-h-screen bg-dribbble-yellow flex justify-center items-center p-0 sm:p-4 text-[#121212] select-none font-sans">
+      <div className="min-h-screen bg-dribbble-yellow flex justify-center items-center p-0 sm:p-2 text-[#121212] select-none font-sans overflow-hidden">
        
-        {/* ── 5" RASPBERRY PI TOUCH DISPLAY FRAME ── */}
-        <div className="w-full max-w-[760px] h-[98vh] max-h-[1200px] bg-[#FFFDF0] border-[4px] border-black rounded-[24px] shadow-[8px_8px_0px_#121212] flex flex-col relative overflow-hidden bg-neo-cream">
+        {/* ── 5" RASPBERRY PI TOUCH DISPLAY FRAME (Tilted 90° for Portrait Kiosk Mounting) ── */}
+        <div 
+          className="bg-[#FFFDF0] border-[4px] border-black rounded-[24px] shadow-[8px_8px_0px_#121212] flex flex-col relative overflow-hidden bg-neo-cream shrink-0"
+          style={{
+            transform: rotation !== 0 ? `rotate(${rotation}deg)` : undefined,
+            transformOrigin: 'center center',
+            width: isRotated ? 'min(760px, 96vh)' : 'min(760px, 98vw)',
+            height: isRotated ? 'min(1200px, 96vw)' : 'min(1200px, 98vh)',
+            maxWidth: isRotated ? '96vh' : '760px',
+            maxHeight: isRotated ? '96vw' : '1200px',
+            transition: 'transform 0.35s cubic-bezier(0.4, 0, 0.2, 1), width 0.35s ease, height 0.35s ease',
+          }}
+        >
 
-          {/* ── HEADER: STATUS (LIVE) + TITLE (PALM VEIN BIOMETRICS) + CLOCK ── */}
+          {/* ── HEADER: STATUS (LIVE) + TITLE (PALM VEIN BIOMETRICS) + ROTATE + CLOCK ── */}
           <div className="px-5 pt-3 pb-2.5 flex items-center justify-between text-xs font-black text-black z-20 border-b-[2px] border-black/10">
             <div className="flex items-center gap-2">
               {/* Secret 5-tap Admin trigger on camera status bead */}
@@ -633,8 +671,19 @@ export default function App() {
               PALM VEIN BIOMETRICS
             </div>
 
-            <div className="text-[11px] font-mono font-black text-[#555]">
-              {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            <div className="flex items-center gap-2">
+              <button
+                onClick={cycleRotation}
+                className="px-2 py-1 bg-white border-[2px] border-black rounded-xl text-[10px] font-black shadow-[2px_2px_0px_#121212] neo-btn flex items-center gap-1 cursor-pointer hover:bg-[#FFE5E5] transition-colors"
+                title="Rotate display 90° (Shortcut: 'R')"
+              >
+                <RotateCw className="w-3 h-3 stroke-[2.5]" />
+                <span>{rotation}°</span>
+              </button>
+
+              <div className="text-[11px] font-mono font-black text-[#555]">
+                {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              </div>
             </div>
           </div>
 
