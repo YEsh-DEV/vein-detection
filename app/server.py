@@ -19,7 +19,7 @@ import asyncio
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Tuple
 from contextlib import asynccontextmanager
 
 os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
@@ -50,11 +50,22 @@ try:
         MATCH_THRESHOLD, ENROLL_CONSISTENCY_THRESHOLD,
         ENROLL_SAMPLE_MIN, ENROLL_SAMPLE_MAX, ENROLLMENT_CACHE_TTL,
         BIOMETRIC_ENGINE, DEBUG_DIAGNOSTICS_MODE, DEBUG_FRAMES_DIR,
+        DEFAULT_EXPOSURE_US, DEFAULT_ANALOGUE_GAIN,
+        BURST_CAPTURE_FRAMES, BURST_FRAME_INTERVAL_S,
+        TARGET_PALM_MEAN_MIN, TARGET_PALM_MEAN_MAX,
         CODE_HAND_TOO_CLOSE, CODE_HAND_TOO_FAR, CODE_HAND_OUTSIDE_FRAME,
         CODE_MEDIAPIPE_NO_LANDMARKS, CODE_INVALID_LANDMARKS,
         CODE_VALLEY_EXTRACTION_FAILED, CODE_ROI_EXTRACTION_FAILED,
         CODE_QUALITY_LOW_CONTRAST, CODE_QUALITY_EXCESSIVE_PADDING,
         CODE_MODEL_NOT_LOADED, CODE_CAMERA_ERROR, CODE_UNKNOWN_PIPELINE_ERROR,
+    )
+    from app.camera_pipeline import (
+        extract_nir_channel,
+        create_display_frame,
+        compute_frame_quality_score,
+        select_best_frame,
+        calculate_calibrated_exposure_and_gain,
+        save_operator_debug_dump,
     )
     from app.capture_errors import CaptureError, ERROR_PRIORITY
     from app.db_manager import (
@@ -78,11 +89,22 @@ except ImportError:
         MATCH_THRESHOLD, ENROLL_CONSISTENCY_THRESHOLD,
         ENROLL_SAMPLE_MIN, ENROLL_SAMPLE_MAX, ENROLLMENT_CACHE_TTL,
         BIOMETRIC_ENGINE, DEBUG_DIAGNOSTICS_MODE, DEBUG_FRAMES_DIR,
+        DEFAULT_EXPOSURE_US, DEFAULT_ANALOGUE_GAIN,
+        BURST_CAPTURE_FRAMES, BURST_FRAME_INTERVAL_S,
+        TARGET_PALM_MEAN_MIN, TARGET_PALM_MEAN_MAX,
         CODE_HAND_TOO_CLOSE, CODE_HAND_TOO_FAR, CODE_HAND_OUTSIDE_FRAME,
         CODE_MEDIAPIPE_NO_LANDMARKS, CODE_INVALID_LANDMARKS,
         CODE_VALLEY_EXTRACTION_FAILED, CODE_ROI_EXTRACTION_FAILED,
         CODE_QUALITY_LOW_CONTRAST, CODE_QUALITY_EXCESSIVE_PADDING,
         CODE_MODEL_NOT_LOADED, CODE_CAMERA_ERROR, CODE_UNKNOWN_PIPELINE_ERROR,
+    )
+    from camera_pipeline import (
+        extract_nir_channel,
+        create_display_frame,
+        compute_frame_quality_score,
+        select_best_frame,
+        calculate_calibrated_exposure_and_gain,
+        save_operator_debug_dump,
     )
     from capture_errors import CaptureError, ERROR_PRIORITY
     from db_manager import (
@@ -138,6 +160,22 @@ def init_hardware_camera():
         p = Picamera2()
         p.configure(p.create_preview_configuration(main={"size": (640, 480), "format": "XBGR8888"}))
         p.start()
+        # Explicitly configure hardware controls for 850nm NoIR imaging:
+        # 1. Disable Auto White Balance (prevents daylight color gains from creating a pink/purple tint)
+        # 2. Lock neutral ColourGains (1.0, 1.0)
+        # 3. Lock calibrated exposure (DEFAULT_EXPOSURE_US, e.g. 18,000 µs) and gain (1.8)
+        try:
+            p.set_controls({
+                "AeEnable": False,
+                "AwbEnable": False,
+                "ColourGains": (1.0, 1.0),
+                "ExposureTime": DEFAULT_EXPOSURE_US,
+                "AnalogueGain": DEFAULT_ANALOGUE_GAIN,
+            })
+            print(f"[+] Picamera2 camera hardware controls locked: Exposure={DEFAULT_EXPOSURE_US}µs, Gain={DEFAULT_ANALOGUE_GAIN}, AwbEnable=False")
+        except Exception as ctrl_err:
+            print(f"[!] Warning: Failed setting initial Picamera2 controls ({ctrl_err})")
+
         picam2 = p
         CAMERA_AVAILABLE = True
         CAMERA_TYPE = "picamera2"
@@ -346,12 +384,13 @@ def _cleanup_expired_enrollment_cache():
 # ---------------------------------------------------------------------------
 # Image Processing & Capture Helpers
 # ---------------------------------------------------------------------------
-def capture_frame_gray() -> np.ndarray:
-    """Captures a single grayscale frame thread-safely."""
+def capture_frame_raw_and_gray() -> Tuple[np.ndarray, np.ndarray]:
+    """Captures a raw camera frame and its calibrated NIR grayscale representation thread-safely."""
     with _camera_lock:
         if CAMERA_TYPE == "picamera2" and picam2 is not None:
             arr = picam2.capture_array("main")
-            return cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY) if len(arr.shape) == 3 else arr
+            gray = extract_nir_channel(arr)
+            return arr, gray
 
         if CAMERA_TYPE == "opencv" and cv_cap is not None:
             for _ in range(2):
@@ -359,12 +398,19 @@ def capture_frame_gray() -> np.ndarray:
             ret, frame = cv_cap.read()
             if not ret or frame is None:
                 raise ValueError("Failed to capture frame from webcam.")
-            return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
+            gray = extract_nir_channel(frame)
+            return frame, gray
 
         raise ValueError("No live camera available. Please connect Raspberry Pi camera or webcam.")
 
 
-def process_image_with_timing(gray: np.ndarray):
+def capture_frame_gray() -> np.ndarray:
+    """Captures a single calibrated NIR grayscale frame thread-safely."""
+    _, gray = capture_frame_raw_and_gray()
+    return gray
+
+
+def process_image_with_timing(gray: np.ndarray, raw_frame: Optional[np.ndarray] = None):
     """
     Extract CLAHE ROI and AMPVNet CNN embedding from a grayscale hand frame while capturing
     granular per-stage latency (landmark detection, ROI alignment/CLAHE, CNN embedding extraction).
@@ -392,7 +438,7 @@ def process_image_with_timing(gray: np.ndarray):
 
     t_roi0 = time.time()
     hand_mask = segment_hand(stretched)
-    roi_224, _, _ = extract_ma2017_scaled_roi(
+    roi_224, bbox, _ = extract_ma2017_scaled_roi(
         stretched, pv1, pv2, hand_mask,
         target_size=224, scale_factor=1.6, offset_factor=0.35,
         landmarks_px=landmarks
@@ -407,17 +453,39 @@ def process_image_with_timing(gray: np.ndarray):
     clahe_roi = enhance_roi_vessels(roi_224)
     t_roi_ms = round((time.time() - t_roi0) * 1000, 2)
 
-    # Diagnostic frame export if debug mode is active (Phase A4)
+    # Diagnostic frame export if debug mode is active (Task 9)
     if _debug_diagnostics_mode:
         try:
-            os.makedirs(DEBUG_FRAMES_DIR, exist_ok=True)
-            ts = int(time.time() * 1000)
-            cv2.imwrite(os.path.join(DEBUG_FRAMES_DIR, f"{ts}_raw.png"), gray)
             overlay = draw_landmarks_overlay(stretched, landmarks, pv1, pv2)
-            cv2.imwrite(os.path.join(DEBUG_FRAMES_DIR, f"{ts}_landmarks.png"), overlay)
-            cv2.imwrite(os.path.join(DEBUG_FRAMES_DIR, f"{ts}_roi.png"), clahe_roi)
+            quality_info = compute_roi_quality(roi_224, bbox, stretched.shape)
+            score_info = compute_frame_quality_score(
+                gray,
+                roi_224=roi_224,
+                pad_pct=quality_info.get("pad_pct", 0.0)
+            )
+            save_operator_debug_dump(
+                raw_frame=raw_frame if raw_frame is not None else gray,
+                processed_gray=gray,
+                landmarks_overlay=overlay,
+                roi_raw=roi_224,
+                roi_enhanced=clahe_roi,
+                diagnostics={
+                    "resolution": f"{gray.shape[1]}x{gray.shape[0]}",
+                    "exposure_us": DEFAULT_EXPOSURE_US,
+                    "analogue_gain": DEFAULT_ANALOGUE_GAIN,
+                    "mean": float(np.mean(gray)),
+                    "contrast_std": float(np.std(gray)),
+                    "dynamic_range": [int(np.min(gray)), int(np.max(gray))],
+                    "saturation_pct": round(float(np.count_nonzero(gray >= 250)) / gray.size * 100.0, 2),
+                    "sharpness": round(float(cv2.Laplacian(gray, cv2.CV_64F).var()), 2),
+                    "roi_bbox": [int(x) for x in bbox] if bbox is not None else None,
+                    "roi_padding_pct": quality_info.get("pad_pct", 0.0),
+                    "roi_contrast_std": quality_info.get("contrast_std", 0.0),
+                    "selected_frame_score": score_info.get("score", 0.0),
+                }
+            )
         except Exception as e:
-            print(f"[!] Warning: Failed to save debug frames: {e}")
+            print(f"[!] Warning: Failed to save operator debug frames: {e}")
 
     t_cnn0 = time.time()
     embedding = extract_embedding(clahe_roi)
@@ -683,21 +751,16 @@ def log_capture_failure_diagnostic(
 
 def capture_burst_and_process_enrollment(
     uname: str,
-    max_frames: int = 5,
-    frame_interval_s: float = 0.08
+    max_frames: int = BURST_CAPTURE_FRAMES,
+    frame_interval_s: float = BURST_FRAME_INTERVAL_S
 ):
     """
-    Acquires a short sequence of frames (e.g. up to 5 frames over ~0.5s–0.8s) during enrollment.
-    Attempts processing on consecutive frames and stops at the very FIRST frame that passes:
-      - positioning heuristic
-      - MediaPipe 21 landmarks
-      - knuckle valley extraction
-      - canonical ROI extraction
-      - strict quality gates (contrast >= 10.0, padding <= 25%, valid 224x224)
-      - L2-normalized 512-D embedding
-    Returns (gray, clahe_roi, embedding, quality, attempt_idx) on first success.
-    If all candidate frames fail, aggregates diagnostics, logs the failure event, and raises
-    the most actionable CaptureError to guide the user.
+    Acquires a short burst of frames during enrollment, runs landmark & quality gates,
+    and applies Best-Frame Selection (Task 5).
+    Selects the single best real frame based on contrast std and Laplacian sharpness.
+    Zero frame blending, zero synthetic averaging.
+    Returns (gray, clahe_roi, embedding, quality, attempt_idx) of the top-scoring frame.
+    If all candidate frames fail, aggregates diagnostics and raises the most actionable CaptureError.
     """
     if not CAMERA_AVAILABLE:
         err = CaptureError(
@@ -710,12 +773,25 @@ def capture_burst_and_process_enrollment(
         raise err
 
     attempt_errors = []
+    valid_candidates = []
 
     for attempt_idx in range(1, max_frames + 1):
         try:
             gray = capture_frame_gray()
             clahe_roi, embedding, quality = process_enrollment_sample(gray)
-            return gray, clahe_roi, embedding, quality, attempt_idx
+            score_dict = compute_frame_quality_score(
+                gray,
+                roi_224=clahe_roi,
+                pad_pct=quality.get("pad_pct", 0.0)
+            )
+            valid_candidates.append({
+                "gray": gray,
+                "clahe_roi": clahe_roi,
+                "embedding": embedding,
+                "quality": quality,
+                "score_dict": score_dict,
+                "attempt_idx": attempt_idx,
+            })
         except CaptureError as ce:
             attempt_errors.append(ce)
         except Exception as ex:
@@ -730,6 +806,17 @@ def capture_burst_and_process_enrollment(
 
         if attempt_idx < max_frames:
             time.sleep(frame_interval_s)
+
+    # Best-Frame Selection: Pick the top-scoring real frame from candidates
+    if valid_candidates:
+        best = select_best_frame(valid_candidates)
+        return (
+            best["gray"],
+            best["clahe_roi"],
+            best["embedding"],
+            best["quality"],
+            best["attempt_idx"],
+        )
 
     # All frames failed — select the most informative error based on priority
     if attempt_errors:
@@ -747,6 +834,73 @@ def capture_burst_and_process_enrollment(
         attempt_details=[e.to_dict() if hasattr(e, "to_dict") else {"detail": str(e)} for e in attempt_errors]
     )
 
+    raise chosen_error
+
+
+def capture_burst_and_process_scan(
+    max_frames: int = 3,
+    frame_interval_s: float = 0.04
+):
+    """
+    Acquires up to 3 candidate frames during scan, evaluates landmark & ROI validity,
+    and applies Best-Frame Selection (Task 5) to pick the real frame with highest optical quality.
+    """
+    if not CAMERA_AVAILABLE:
+        raise CaptureError(
+            error_code=CODE_CAMERA_ERROR,
+            instruction="Camera hardware not available.",
+            stage="camera",
+            diagnostics={"camera_available": False, "detail": CAMERA_ERROR_DETAIL}
+        )
+
+    attempt_errors = []
+    valid_candidates = []
+
+    for attempt_idx in range(1, max_frames + 1):
+        try:
+            gray = capture_frame_gray()
+            clahe_roi, embedding, proc_timing = process_image_with_timing(gray)
+            score_dict = compute_frame_quality_score(gray, roi_224=clahe_roi)
+            valid_candidates.append({
+                "gray": gray,
+                "clahe_roi": clahe_roi,
+                "embedding": embedding,
+                "proc_timing": proc_timing,
+                "score_dict": score_dict,
+                "attempt_idx": attempt_idx,
+            })
+        except CaptureError as ce:
+            attempt_errors.append(ce)
+        except Exception as ex:
+            attempt_errors.append(
+                CaptureError(
+                    error_code=CODE_UNKNOWN_PIPELINE_ERROR,
+                    instruction=f"Pipeline error: {ex}",
+                    stage="pipeline",
+                    diagnostics={"error": str(ex)}
+                )
+            )
+
+        if attempt_idx < max_frames:
+            time.sleep(frame_interval_s)
+
+    if valid_candidates:
+        best = select_best_frame(valid_candidates)
+        return (
+            best["gray"],
+            best["clahe_roi"],
+            best["embedding"],
+            best["proc_timing"]
+        )
+
+    if attempt_errors:
+        chosen_error = max(attempt_errors, key=lambda e: getattr(e, "priority", 10))
+    else:
+        chosen_error = CaptureError(
+            error_code=CODE_UNKNOWN_PIPELINE_ERROR,
+            instruction="No valid scan frames acquired during burst.",
+            stage="pipeline"
+        )
     raise chosen_error
 
 
@@ -791,7 +945,9 @@ def generate_video_stream():
         if frame is None:
             continue
 
-        ret, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        # Transform raw camera frame into clean monochrome enhanced visualization (Task 7)
+        disp_frame = create_display_frame(frame)
+        ret, buf = cv2.imencode(".jpg", disp_frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
         if not ret:
             continue
 
@@ -856,21 +1012,8 @@ async def scan_palm():
     t0 = time.time()
     t_cap0 = time.time()
     try:
-        gray = await run_in_threadpool(capture_frame_gray)
-    except Exception as e:
-        err = CaptureError(
-            error_code=CODE_CAMERA_ERROR,
-            instruction="Camera hardware not available.",
-            stage="camera",
-            diagnostics={"detail": str(e)}
-        )
-        log_capture_failure_diagnostic(err, attempts=1, attempt_details=[err.to_dict()])
-        return JSONResponse(status_code=503, content=err.to_dict())
-    t_capture_ms = round((time.time() - t_cap0) * 1000, 2)
-
-    try:
-        clahe_roi, embedding, proc_timing = await asyncio.wait_for(
-            run_in_threadpool(process_image_with_timing, gray),
+        gray, clahe_roi, embedding, proc_timing = await asyncio.wait_for(
+            run_in_threadpool(capture_burst_and_process_scan, 3, 0.04),
             timeout=15.0
         )
     except asyncio.TimeoutError:
@@ -900,7 +1043,8 @@ async def scan_palm():
             diagnostics={"error": str(e)}
         )
         log_capture_failure_diagnostic(err, attempts=1, attempt_details=[err.to_dict()])
-        return JSONResponse(status_code=400, content=err.to_dict())
+        return JSONResponse(status_code=500, content=err.to_dict())
+    t_capture_ms = round((time.time() - t_cap0) * 1000, 2)
 
     try:
         search_diag = await asyncio.wait_for(

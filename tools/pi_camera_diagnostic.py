@@ -53,7 +53,8 @@ try:
         compute_roi_quality,
         enhance_roi_vessels,
     )
-    from app.constants import MODEL_PATH, EXPERIMENTAL_MATCH_THRESHOLD
+    from app.constants import MODEL_PATH, EXPERIMENTAL_MATCH_THRESHOLD, DEFAULT_EXPOSURE_US, DEFAULT_ANALOGUE_GAIN
+    from app.camera_pipeline import extract_nir_channel, create_display_frame
 except ImportError as e:
     print(f"[!] Warning: App import failed: {e}")
     sys.exit(1)
@@ -166,6 +167,8 @@ def capture_diagnostic_frame(picam2_info, args):
             p.start()
             p.set_controls({
                 "AeEnable": False,
+                "AwbEnable": False,
+                "ColourGains": (1.0, 1.0),
                 "ExposureTime": exposure_us,
                 "AnalogueGain": gain,
             })
@@ -229,6 +232,7 @@ def analyze_frame_signal(gray: np.ndarray):
 
 def run_diagnostics(args):
     pipeline_errors = []
+    recommendations = []
     print_header("RASPBERRY PI PALM-VEIN CAMERA & CAPTURE DIAGNOSTIC")
     print(f"Timestamp : {time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Host OS   : {sys.platform} | Python: {sys.version.split()[0]}")
@@ -273,11 +277,20 @@ def run_diagnostics(args):
         print("=" * 70 + "\n")
         return 1
 
-    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    gray = extract_nir_channel(frame_bgr)
     h, w = gray.shape
 
     print_status("Frame Source", "INFO", f"{source} (Resolution: {w}x{h})")
     print_status("Exposure Setting", "INFO", f"Exposure: {capture_meta.get('exposure_us')} µs | Gain: {capture_meta.get('gain')}")
+
+    # Channel comparison & NIR signal audit (Task 2 & 3)
+    if frame_bgr.ndim == 3 and frame_bgr.shape[2] >= 3:
+        b_ch, g_ch, r_ch = frame_bgr[:, :, 0], frame_bgr[:, :, 1], frame_bgr[:, :, 2]
+        print(f"\n  Bayer Channel Signal Breakdown:")
+        print(f"    - Blue Channel Mean/Std   : {float(b_ch.mean()):.1f} / {float(b_ch.std()):.1f}")
+        print(f"    - Green Channel Mean/Std  : {float(g_ch.mean()):.1f} / {float(g_ch.std()):.1f}")
+        print(f"    - Red Channel Mean/Std    : {float(r_ch.mean()):.1f} / {float(r_ch.std()):.1f}")
+        print(f"    - Calibrated NIR Gray Mean: {float(gray.mean()):.1f} / {float(gray.std()):.1f}")
 
     stats = analyze_frame_signal(gray)
     print(f"\n  Signal Statistics:")
@@ -410,7 +423,6 @@ def run_diagnostics(args):
     # 6. ACTIONABLE OPERATOR RECOMMENDATIONS
     # =========================================================================
     print_header("6. ACTIONABLE OPERATOR RECOMMENDATIONS")
-    recommendations = []
 
     if pipeline_errors:
         print("\n  \033[91m[✗ FAIL] PIPELINE IMPLEMENTATION / RUNTIME ERRORS DETECTED:\033[0m")
@@ -473,10 +485,10 @@ if __name__ == "__main__":
                         help="Run in synthetic simulation mode (for laptop testing without physical camera)")
     parser.add_argument("--v4l2", action="store_true",
                         help="Allow secondary USB V4L2 webcam probe if Picamera2 is unavailable")
-    parser.add_argument("--exposure-us", type=int, default=5000,
-                        help="Shutter exposure in microseconds (default: 5000)")
-    parser.add_argument("--gain", type=float, default=1.0,
-                        help="Analogue gain (default: 1.0)")
+    parser.add_argument("--exposure-us", type=int, default=DEFAULT_EXPOSURE_US,
+                        help=f"Shutter exposure in microseconds (default: {DEFAULT_EXPOSURE_US})")
+    parser.add_argument("--gain", type=float, default=DEFAULT_ANALOGUE_GAIN,
+                        help=f"Analogue gain (default: {DEFAULT_ANALOGUE_GAIN})")
     parser.add_argument("--save-frame", type=str, default="",
                         help="Path to save captured diagnostic frame")
     args = parser.parse_args()

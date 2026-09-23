@@ -54,6 +54,32 @@ CODE_UNKNOWN_PIPELINE_ERROR = "UNKNOWN_PIPELINE_ERROR"
 DEBUG_DIAGNOSTICS_MODE = os.environ.get("DEBUG_DIAGNOSTICS_MODE", "false").lower() in ("true", "1", "yes")
 DEBUG_FRAMES_DIR = os.path.join(PROJECT_ROOT, "debug_frames")
 
+# ---------------------------------------------------------------------------
+# Camera & Optical Pipeline Tuning Constants (NoIR Sensor Calibration)
+# ---------------------------------------------------------------------------
+# Calibrated exposure and gain defaults for Raspberry Pi OV5647 NoIR with 850nm IR LEDs.
+# 5000 us @ gain 1.0 was severely underexposed (mean 37.85, contrast std 10.16).
+# 18,000 us (18 ms, ~1/55s) @ gain 1.8 brings palm mean intensity into the optimal 85-135 range
+# while preventing motion blur and high-gain thermal noise.
+DEFAULT_EXPOSURE_US = int(os.environ.get("CAMERA_EXPOSURE_US", "18000"))
+DEFAULT_ANALOGUE_GAIN = float(os.environ.get("CAMERA_GAIN", "1.8"))
+
+# Bounded calibration search ranges for Picamera2
+EXPOSURE_SEARCH_BOUNDS_US = (8000, 30000)
+GAIN_SEARCH_BOUNDS = (1.0, 3.0)
+EXPOSURE_SEARCH_STEPS_US = [10000, 15000, 20000, 25000]
+GAIN_SEARCH_STEPS = [1.0, 1.5, 2.0, 2.5]
+
+# Quality gate bounds for palm illumination
+TARGET_PALM_MEAN_MIN = 75.0
+TARGET_PALM_MEAN_MAX = 145.0
+MIN_CONTRAST_STD = 15.0
+MAX_IR_SATURATION_PCT = 2.5
+
+# Best-frame burst selection parameters
+BURST_CAPTURE_FRAMES = 5
+BURST_FRAME_INTERVAL_S = 0.05
+
 # Ensure runtime directories exist
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(MODELS_DIR, exist_ok=True)
