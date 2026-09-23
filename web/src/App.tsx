@@ -18,7 +18,8 @@ import {
   Info,
   Scan,
   Hand,
-  Sparkles
+  Sparkles,
+  Trash2
 } from 'lucide-react';
 
 type AppState = 'idle' | 'scan' | 'enroll';
@@ -578,6 +579,30 @@ export default function App() {
     }
   };
 
+  const [isCleaningDb, setIsCleaningDb] = useState(false);
+
+  const handleCleanDatabase = async () => {
+    if (!window.confirm("⚠️ CLEAN USERS DATABASE FOR DEMO?\n\nThis will remove all enrolled users and biometric templates so you can perform a clean, error-free live demonstration.")) {
+      return;
+    }
+    setIsCleaningDb(true);
+    try {
+      const res = await fetch('/api/database/reset', { method: 'POST' });
+      if (res.ok) {
+        showToast("Database cleaned! 0 users enrolled — ready for fresh demo.", "success");
+        fetchReport();
+        loadStatus();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.detail || "Failed to reset database.", "error");
+      }
+    } catch {
+      showToast("Error connecting to server.", "error");
+    } finally {
+      setIsCleaningDb(false);
+    }
+  };
+
   return (
     <ErrorBoundary>
       <div className="min-h-screen bg-dribbble-yellow flex justify-center items-center p-0 sm:p-4 text-[#121212] select-none font-sans">
@@ -709,8 +734,8 @@ export default function App() {
                   POWERED BY SUB-DERMAL VASCULAR INTELLIGENCE
                 </div>
 
-                {/* Floating keyword pills — widely scattered at big scale without overlapping */}
-                <div className="relative h-40 sm:h-44 w-full max-w-[650px] mx-auto select-none">
+                {/* Floating keyword pills + Clean Users Demo Button — scattered at big scale */}
+                <div className="relative h-44 sm:h-48 w-full max-w-[650px] mx-auto select-none">
 
                   {/* VEIN MAPPING — top-left, floats slow */}
                   <span
@@ -737,6 +762,32 @@ export default function App() {
                     📡 NIR SENSOR
                   </span>
 
+                  {/* CLEAN USERS DATA (DEMO RESET BUTTON) — centered & floating */}
+                  <div className="absolute left-1/2 -translate-x-1/2 top-[48px] z-20">
+                    <button
+                      onClick={handleCleanDatabase}
+                      disabled={isCleaningDb}
+                      title="Clean all enrolled users from database for a fresh demo"
+                      className="px-4 py-2 bg-white text-black border-[2.5px] border-black rounded-2xl font-display font-black text-xs shadow-[3px_3px_0px_#121212] neo-btn hover:bg-[#FFE5E5] active:translate-x-[2px] active:translate-y-[2px] cursor-pointer flex items-center gap-1.5 select-none"
+                      style={{
+                        animation: 'floatBadge 4.6s ease-in-out infinite',
+                        animationDelay: '1.2s',
+                      }}
+                    >
+                      {isCleaningDb ? (
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin text-[#FF4081]" />
+                      ) : (
+                        <Trash2 className="w-3.5 h-3.5 text-[#FF4081] stroke-[2.5]" />
+                      )}
+                      <span>CLEAN USERS DATA</span>
+                      {totalUsers > 0 && (
+                        <span className="px-1.5 py-0.5 bg-[#FF4081] text-white rounded-full text-[10px] font-black leading-tight">
+                          {totalUsers}
+                        </span>
+                      )}
+                    </button>
+                  </div>
+
                   {/* ZERO CONTACT — bottom-left, floats fast */}
                   <span
                     className="absolute px-4 py-2 bg-[#CCFF00] text-black border-[2.5px] border-black rounded-2xl font-display font-black text-xs shadow-[3px_3px_0px_#121212] select-none pointer-events-none"
@@ -744,7 +795,7 @@ export default function App() {
                       animation: 'floatBadge 5.0s ease-in-out infinite',
                       animationDelay: '1.7s',
                       left: '10%',
-                      top: '88px',
+                      top: '96px',
                     }}
                   >
                     ✋ ZERO CONTACT
@@ -757,7 +808,7 @@ export default function App() {
                       animation: 'floatBadge 3.0s ease-in-out infinite',
                       animationDelay: '2.5s',
                       right: '10%',
-                      top: '80px',
+                      top: '90px',
                     }}
                   >
                     💡 LIVE TISSUE

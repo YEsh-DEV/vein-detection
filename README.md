@@ -81,7 +81,7 @@ python3 server.py
 #### First-Run Web UI Walkthrough:
 1. **Stats Tab:** Click **RESET DATABASE** to initialize a clean biometric vault.
 2. **Enroll Tab:** Enter a username, follow the 5-second countdown timer across 6 postures (flat, tilt left, tilt right, higher, wider), and click **SAVE TO DATABASE**.
-3. **Scan Tab:** Select verification intent (**Palm Pay Auth**, **Door Access**, or **Identity Verify**) and start the 3-second palm scan.
+3. **Scan Tab:** Select verification intent (**Identity Verify**, **Terminal Access**, or **Attendance Check**) and start the 3-second palm scan.
 
 ---
 
