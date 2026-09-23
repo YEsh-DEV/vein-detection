@@ -197,16 +197,11 @@ def create_display_frame(raw_bgr: np.ndarray, method: Optional[str] = None) -> n
         (nir - lo) / (hi - lo) * 255.0, 0, 255
     ).astype(np.uint8)
 
-    # Invert: in NIR reflectance mode veins are DARKER than tissue.
-    # Inverting makes veins appear as bright lines on dark background
-    # which is easier for both human operators AND MediaPipe to detect.
-    nir_inv = 255 - nir_norm
-
     clahe = cv2.createCLAHE(
         clipLimit=DISPLAY_CLAHE_CLIP,
         tileGridSize=DISPLAY_CLAHE_GRID
     )
-    enhanced = clahe.apply(nir_inv)
+    enhanced = clahe.apply(nir_norm)
     enhanced = cv2.GaussianBlur(enhanced, (3, 3), 0)
 
     display = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)

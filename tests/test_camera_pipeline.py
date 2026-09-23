@@ -115,10 +115,10 @@ class TestCameraPipeline(unittest.TestCase):
         new_exp, new_gain = calculate_calibrated_exposure_and_gain(
             current_mean=115.0,
             current_sat_pct=0.5,
-            current_exposure_us=3000,
+            current_exposure_us=6000,
             current_gain=1.0,
         )
-        self.assertEqual(new_exp, 3000, "Optimal exposure should remain stable")
+        self.assertEqual(new_exp, 6000, "Optimal exposure should remain stable")
         self.assertEqual(new_gain, 1.0, "Optimal gain should remain stable")
 
     def test_03_display_enhancement_removes_purple_and_separates_from_model(self):
@@ -222,7 +222,7 @@ class TestCameraPipeline(unittest.TestCase):
 
         diag_data = {
             "resolution": "640x480",
-            "exposure_us": 3000,
+            "exposure_us": 6000,
             "analogue_gain": 1.0,
             "mean": 112.5,
             "contrast_std": 24.3,
@@ -367,8 +367,8 @@ class TestCameraPipeline(unittest.TestCase):
         with open(sweep_json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        self.assertIn("candidates_tested", data)
-        self.assertEqual(len(data["candidates_tested"]), 8)
+        from tools.sweep_camera_exposure import SWEEP_PRESETS
+        self.assertEqual(len(data["candidates_tested"]), len(SWEEP_PRESETS))
         for cand in data["candidates_tested"]:
             self.assertIn("exposure_us", cand)
             self.assertIn("analogue_gain", cand)

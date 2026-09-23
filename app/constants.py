@@ -58,23 +58,22 @@ DEBUG_FRAMES_DIR = os.path.join(PROJECT_ROOT, "debug_frames")
 # Camera & Optical Pipeline Tuning Constants (NoIR Sensor Calibration)
 # ---------------------------------------------------------------------------
 # Candidate exposure and gain settings for Raspberry Pi OV5647 NoIR with 850nm IR LEDs.
-DEFAULT_EXPOSURE_US = int(os.environ.get("CAMERA_EXPOSURE_US", "3000"))
+DEFAULT_EXPOSURE_US = int(os.environ.get("CAMERA_EXPOSURE_US", "6000"))
 DEFAULT_ANALOGUE_GAIN = float(os.environ.get("CAMERA_GAIN", "1.0"))
 
-MIN_EXPOSURE_US = 500
-MAX_EXPOSURE_US = 8000
+MIN_EXPOSURE_US = 1000
+MAX_EXPOSURE_US = 12000
 MIN_ANALOGUE_GAIN = 1.0
 MAX_ANALOGUE_GAIN = 1.8
 
 # Bounded calibration search ranges for Picamera2
 EXPOSURE_SEARCH_BOUNDS_US = (MIN_EXPOSURE_US, MAX_EXPOSURE_US)
 GAIN_SEARCH_BOUNDS = (MIN_ANALOGUE_GAIN, MAX_ANALOGUE_GAIN)
-EXPOSURE_SEARCH_STEPS_US = [500, 1000, 2000, 3000, 4000, 5000, 6000, 8000]
+EXPOSURE_SEARCH_STEPS_US = [1000, 2000, 3000, 4000, 5000, 6000, 8000, 10000, 12000]
 GAIN_SEARCH_STEPS = [1.0, 1.2, 1.4, 1.6, 1.8]
 
 # Candidate exposure sweep pairs for empirical hardware validation
 EXPOSURE_SWEEP_PRESETS = [
-    (500,  1.0),
     (1000, 1.0),
     (2000, 1.0),
     (3000, 1.0),
@@ -82,6 +81,8 @@ EXPOSURE_SWEEP_PRESETS = [
     (5000, 1.0),
     (6000, 1.0),
     (8000, 1.0),
+    (10000, 1.0),
+    (12000, 1.0),
 ]
 CANDIDATE_EXPOSURE_SWEEPS = EXPOSURE_SWEEP_PRESETS
 
@@ -94,14 +95,14 @@ NIR_WEIGHT_BLUE = 0.25
 NIR_EXTRACTION_METHOD = os.environ.get("NIR_EXTRACTION_METHOD", "weighted_nir").lower()
 
 # Display-Only Percentile-Clipped Normalization & Gentle CLAHE
-DISPLAY_PERCENTILE_LOW = 1.0
-DISPLAY_PERCENTILE_HIGH = 85.0
-DISPLAY_CLAHE_CLIP = 2.0
+DISPLAY_PERCENTILE_LOW = 2.0
+DISPLAY_PERCENTILE_HIGH = 96.0
+DISPLAY_CLAHE_CLIP = 1.8
 DISPLAY_CLAHE_GRID = (8, 8)
 
 # Quality gate bounds for palm illumination
 TARGET_PALM_MEAN_MIN = 80.0
-TARGET_PALM_MEAN_MAX = 150.0
+TARGET_PALM_MEAN_MAX = 160.0
 MIN_CONTRAST_STD = 12.0
 MAX_IR_SATURATION_PCT = 3.0
 MIN_SHARPNESS_LAPLACIAN = 10.0
