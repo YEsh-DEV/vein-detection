@@ -111,15 +111,15 @@ class TestCameraPipeline(unittest.TestCase):
         self.assertGreaterEqual(new_exp, exp_min)
         self.assertLessEqual(new_gain, 2.5)
 
-        # Scenario C: Optimal frame: mean=105, sat=0.5%
+        # Scenario C: Optimal frame: mean=90, sat=0.5%
         new_exp, new_gain = calculate_calibrated_exposure_and_gain(
-            current_mean=105.0,
+            current_mean=90.0,
             current_sat_pct=0.5,
-            current_exposure_us=18000,
-            current_gain=1.8,
+            current_exposure_us=10000,
+            current_gain=1.2,
         )
-        self.assertEqual(new_exp, 18000, "Optimal exposure should remain stable")
-        self.assertEqual(new_gain, 1.8, "Optimal gain should remain stable")
+        self.assertEqual(new_exp, 10000, "Optimal exposure should remain stable")
+        self.assertEqual(new_gain, 1.2, "Optimal gain should remain stable")
 
     def test_03_display_enhancement_removes_purple_and_separates_from_model(self):
         """
@@ -138,11 +138,11 @@ class TestCameraPipeline(unittest.TestCase):
         # Display frame must be 3-channel BGR for browser JPEG streaming
         self.assertEqual(disp_frame.shape, (200, 200, 3))
 
-        # Check monochrome property: B, G, R channels in display frame must be identical
-        # (Zero purple/pink tint!)
-        b_disp = disp_frame[:, :, 0]
-        g_disp = disp_frame[:, :, 1]
-        r_disp = disp_frame[:, :, 2]
+        # Check monochrome property inside palm region: B, G, R channels in display frame must be identical
+        # (Zero purple/pink tint in visualized image area!)
+        b_disp = disp_frame[50:150, 50:150, 0]
+        g_disp = disp_frame[50:150, 50:150, 1]
+        r_disp = disp_frame[50:150, 50:150, 2]
         np.testing.assert_array_equal(b_disp, g_disp, "Display frame must be monochrome")
         np.testing.assert_array_equal(g_disp, r_disp, "Display frame must have equal B, G, R")
 

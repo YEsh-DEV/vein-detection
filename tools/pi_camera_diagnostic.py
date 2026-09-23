@@ -167,7 +167,7 @@ def capture_diagnostic_frame(picam2_info, args):
 
     # 1. Explicit synthetic flag
     if args.synthetic:
-        return create_synthetic_frame(), "SYNTHETIC", {"exposure_us": 0, "gain": 0}
+        return create_synthetic_frame(), "SYNTHETIC", {"exposure_us": DEFAULT_EXPOSURE_US, "gain": DEFAULT_ANALOGUE_GAIN}
 
     # 2. Primary: Picamera2
     if picam2_info.get("available") and picam2_info.get("instance") is not None:

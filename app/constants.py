@@ -58,40 +58,44 @@ DEBUG_FRAMES_DIR = os.path.join(PROJECT_ROOT, "debug_frames")
 # Camera & Optical Pipeline Tuning Constants (NoIR Sensor Calibration)
 # ---------------------------------------------------------------------------
 # Candidate exposure and gain settings for Raspberry Pi OV5647 NoIR with 850nm IR LEDs.
-# Note: 18,000 µs @ Gain 1.8 is treated as a candidate setting to be confirmed
-# by empirical sweep on physical hardware.
-DEFAULT_EXPOSURE_US = int(os.environ.get("CAMERA_EXPOSURE_US", "18000"))
-DEFAULT_ANALOGUE_GAIN = float(os.environ.get("CAMERA_GAIN", "1.8"))
+DEFAULT_EXPOSURE_US = int(os.environ.get("CAMERA_EXPOSURE_US", "10000"))
+DEFAULT_ANALOGUE_GAIN = float(os.environ.get("CAMERA_GAIN", "1.2"))
+
+MIN_EXPOSURE_US = 4000
+MAX_EXPOSURE_US = 16000
+MIN_ANALOGUE_GAIN = 1.0
+MAX_ANALOGUE_GAIN = 2.0
 
 # Bounded calibration search ranges for Picamera2
-EXPOSURE_SEARCH_BOUNDS_US = (8000, 30000)
-GAIN_SEARCH_BOUNDS = (1.0, 3.0)
-EXPOSURE_SEARCH_STEPS_US = [10000, 15000, 20000, 25000]
-GAIN_SEARCH_STEPS = [1.0, 1.5, 2.0, 2.5]
+EXPOSURE_SEARCH_BOUNDS_US = (MIN_EXPOSURE_US, MAX_EXPOSURE_US)
+GAIN_SEARCH_BOUNDS = (MIN_ANALOGUE_GAIN, MAX_ANALOGUE_GAIN)
+EXPOSURE_SEARCH_STEPS_US = [5000, 7000, 10000, 12000, 14000]
+GAIN_SEARCH_STEPS = [1.0, 1.1, 1.2, 1.3, 1.5]
 
 # Candidate exposure sweep pairs for empirical hardware validation
-CANDIDATE_EXPOSURE_SWEEPS = [
+EXPOSURE_SWEEP_PRESETS = [
+    (5000, 1.0),
+    (7000, 1.1),
     (10000, 1.2),
+    (12000, 1.3),
     (14000, 1.5),
-    (18000, 1.8),  # Current candidate
-    (22000, 2.0),
-    (26000, 2.2),
 ]
+CANDIDATE_EXPOSURE_SWEEPS = EXPOSURE_SWEEP_PRESETS
 
 # Configurable NIR channel extraction method:
 # 'weighted_nir' (0.50R + 0.25G + 0.25B), 'r_channel', 'g_channel', 'b_channel', 'rec601_gray', 'equal_nir'
 NIR_EXTRACTION_METHOD = os.environ.get("NIR_EXTRACTION_METHOD", "weighted_nir").lower()
 
 # Display-Only Percentile-Clipped Normalization & Gentle CLAHE
-DISPLAY_PERCENTILE_LOW = 2.0
-DISPLAY_PERCENTILE_HIGH = 96.0
-DISPLAY_CLAHE_CLIP = 1.2
+DISPLAY_PERCENTILE_LOW = 5.0
+DISPLAY_PERCENTILE_HIGH = 90.0
+DISPLAY_CLAHE_CLIP = 0.8
 DISPLAY_CLAHE_GRID = (8, 8)
 
 # Quality gate bounds for palm illumination
-TARGET_PALM_MEAN_MIN = 75.0
-TARGET_PALM_MEAN_MAX = 145.0
-MIN_CONTRAST_STD = 15.0
+TARGET_PALM_MEAN_MIN = 60.0
+TARGET_PALM_MEAN_MAX = 120.0
+MIN_CONTRAST_STD = 14.0
 MAX_IR_SATURATION_PCT = 2.5
 
 # Best-frame burst selection parameters

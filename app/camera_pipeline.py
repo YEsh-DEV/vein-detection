@@ -109,50 +109,65 @@ def extract_nir_channel(frame: np.ndarray, method: Optional[str] = None) -> np.n
 # ---------------------------------------------------------------------------
 # 2. Display-Only Enhancement Pipeline (Human-Readable UI)
 # ---------------------------------------------------------------------------
-def create_display_frame(raw_frame: np.ndarray, method: Optional[str] = None) -> np.ndarray:
+def create_display_frame(raw_bgr: np.ndarray, method: Optional[str] = None) -> np.ndarray:
     """
-    Transforms raw camera frame into a balanced, percentile-normalized monochrome visualization
-    for live browser preview (/api/video_feed) and operator inspection.
-
-    CRITICAL ARCHITECTURAL BOUNDARY:
-    This function is strictly for OPERATOR DISPLAY ONLY.
-    Its output is NEVER fed into MediaPipe, MA2017 ROI extraction, or AMPVNet.
-
-    Transformations applied (Problem 1 & Problem 5):
-    1. Obtain the best available NIR representation via extract_nir_channel().
-    2. Percentile-clipped normalization:
-       - low percentile ≈ P2
-       - high percentile ≈ P96
-    3. Clip intensity values before mapping to 0-255 (avoids full min/max stretching that pushes palm to pure white).
-    4. Gentle CLAHE:
-       - clipLimit ≈ 1.2
-       - tileGridSize = (8, 8)
-       - avoids aggressive local contrast amplification, avoiding harsh skin creases.
-    5. Convert to 3-channel BGR for browser JPEG streaming compatibility.
+    Display pipeline with hotspot suppression and percentile normalization.
+    Designed for close-range 850nm LED which creates bright central hotspot.
     """
-    if raw_frame is None:
+    if raw_bgr is None:
         return None
 
-    # Step 1: Best available NIR representation
-    nir_gray = extract_nir_channel(raw_frame, method=method)
+    nir = extract_nir_channel(raw_bgr, method=method)
 
-    # Step 2 & 3: Percentile-clipped normalization (P2 - P96)
-    p_low = float(np.percentile(nir_gray, DISPLAY_PERCENTILE_LOW))
-    p_high = float(np.percentile(nir_gray, DISPLAY_PERCENTILE_HIGH))
+    # Step 1: Suppress specular hotspot using local mean normalization
+    # Blur gives us the "background illumination envelope"
+    h, w = nir.shape[:2]
+    k = 61
+    if h < 61 or w < 61:
+        k = max(3, (min(h, w) // 2) * 2 - 1)
+    illumination_map = cv2.GaussianBlur(nir, (k, k), 0)
 
-    # Protect against flat or degenerate frames
-    if p_high > p_low + 5.0:
-        clipped = np.clip(nir_gray.astype(np.float32), p_low, p_high)
-        normalized = ((clipped - p_low) / (p_high - p_low) * 255.0).astype(np.uint8)
+    # Divide out uneven illumination (homomorphic-style correction)
+    nir_corrected = np.clip(
+        (nir.astype(np.float32) / (illumination_map.astype(np.float32) + 1e-6)) * 100.0,
+        0, 255
+    ).astype(np.uint8)
+
+    # Step 2: Percentile-clipped normalization on corrected image
+    lo = np.percentile(nir_corrected, DISPLAY_PERCENTILE_LOW)    # 5.0
+    hi = np.percentile(nir_corrected, DISPLAY_PERCENTILE_HIGH)   # 90.0
+    if hi - lo < 10:
+        hi = lo + 10
+    nir_norm = np.clip(
+        (nir_corrected.astype(np.float32) - lo) / (hi - lo) * 255.0,
+        0, 255
+    ).astype(np.uint8)
+
+    # Step 3: Gentle CLAHE (low clip to avoid amplifying noise)
+    clahe = cv2.createCLAHE(clipLimit=DISPLAY_CLAHE_CLIP, tileGridSize=(8, 8))
+    enhanced = clahe.apply(nir_norm)
+
+    # Step 4: Light denoise
+    enhanced = cv2.GaussianBlur(enhanced, (3, 3), 0)
+
+    # Step 5: Guide box overlay
+    h, w = enhanced.shape[:2]
+    display = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+    bx1, by1, bx2, by2 = int(w * 0.15), int(h * 0.05), int(w * 0.85), int(h * 0.95)
+    corner = min(25, int(w * 0.1), int(h * 0.1))
+    col, thick = (0, 220, 0), 2
+    for cx, cy in [(bx1, by1), (bx2, by1), (bx1, by2), (bx2, by2)]:
+        dx = corner if cx == bx1 else -corner
+        dy = corner if cy == by1 else -corner
+        cv2.line(display, (cx, cy), (cx + dx, cy), col, thick)
+        cv2.line(display, (cx, cy), (cx, cy + dy), col, thick)
+    if by1 >= 10:
+        cv2.putText(display, "Place palm here | 10-14cm", (bx1, by1 - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, col, 1)
     else:
-        normalized = nir_gray
-
-    # Step 4: Gentle CLAHE for natural, informative NIR visualization (clipLimit=1.2, grid=(8, 8))
-    clahe = cv2.createCLAHE(clipLimit=DISPLAY_CLAHE_CLIP, tileGridSize=DISPLAY_CLAHE_GRID)
-    disp_enhanced = clahe.apply(normalized)
-
-    # Step 5: Convert to 3-channel BGR for browser JPEG stream compatibility
-    return cv2.cvtColor(disp_enhanced, cv2.COLOR_GRAY2BGR)
+        cv2.putText(display, "Place palm here | 10-14cm", (bx1, by1 + 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, col, 1)
+    return display
 
 
 # ---------------------------------------------------------------------------

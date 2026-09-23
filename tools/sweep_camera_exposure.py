@@ -41,7 +41,6 @@ import cv2
 import numpy as np
 
 from app.constants import (
-    CANDIDATE_EXPOSURE_SWEEPS,
     DEBUG_FRAMES_DIR,
     TARGET_PALM_MEAN_MIN,
     TARGET_PALM_MEAN_MAX,
@@ -52,6 +51,14 @@ from app.camera_pipeline import (
     compute_palm_region_mask,
     compute_channel_metrics,
 )
+
+SWEEP_PRESETS = [
+    (5000,  1.0),
+    (7000,  1.1),
+    (10000, 1.2),
+    (12000, 1.3),
+    (14000, 1.5),
+]
 
 
 def capture_candidate_picamera2(picam2, exposure_us: int, gain: float) -> np.ndarray:
@@ -75,7 +82,7 @@ def simulate_candidate_frame(base_frame: np.ndarray, exp_us: int, gain: float) -
     Simulates optical response under scaled exposure and gain for laptop testing.
     Includes sensor scaling, non-linear saturation, and Poisson-like noise.
     """
-    scale = (exp_us / 18000.0) * (gain / 1.8)
+    scale = (exp_us / 10000.0) * (gain / 1.2)
     sim = base_frame.astype(np.float32) * scale
     # Add mild noise proportional to gain
     noise = np.random.normal(0, gain * 1.5, sim.shape)
@@ -131,7 +138,7 @@ def run_exposure_sweep(args):
     best_score = -999.0
 
     try:
-        for exp_us, gain in CANDIDATE_EXPOSURE_SWEEPS:
+        for exp_us, gain in SWEEP_PRESETS:
             if is_real_pi and picam2 is not None:
                 frame_bgr = capture_candidate_picamera2(picam2, exp_us, gain)
             else:
@@ -181,7 +188,7 @@ def run_exposure_sweep(args):
                 "sharpness": sharpness,
                 "score": round(score, 2),
                 "verdict": verdict,
-                "is_candidate": bool(exp_us == 18000 and gain == 1.8),
+                "is_candidate": bool(exp_us == 10000 and gain == 1.2),
             }
             sweep_results.append(item)
 
@@ -203,7 +210,7 @@ def run_exposure_sweep(args):
             picam2.stop()
 
     print("=" * 95)
-    print("  [*] Current candidate setting: 18,000 µs @ Gain 1.8\n")
+    print("  [*] Current candidate setting: 10,000 µs @ Gain 1.2\n")
 
     summary = {
         "hardware_source": "REAL_PICAMERA2" if is_real_pi else ("IMAGE_SIMULATION" if args.image else "SYNTHETIC_SIMULATION"),
