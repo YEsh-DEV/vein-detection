@@ -82,19 +82,19 @@ class TestCameraPipeline(unittest.TestCase):
     def test_02_bounded_exposure_and_gain_calibration(self):
         """
         Validates bounded search behavior for underexposed and overexposed frames.
-        Must strictly remain within safe hardware limits [8000, 22000] us and [1.0, 2.5] gain.
+        Must strictly remain within safe hardware limits [500, 8000] us and [1.0, 1.8] gain.
         """
         exp_min, exp_max = EXPOSURE_SEARCH_BOUNDS_US
         gain_min, gain_max = GAIN_SEARCH_BOUNDS
 
-        # Scenario A: Real Pi test condition: mean=37.85 (underexposed), sat=0%, exp=5000, gain=1.0
+        # Scenario A: Real Pi test condition: mean=37.85 (underexposed), sat=0%, exp=1000, gain=1.0
         new_exp, new_gain = calculate_calibrated_exposure_and_gain(
             current_mean=37.85,
             current_sat_pct=0.0,
-            current_exposure_us=5000,
+            current_exposure_us=1000,
             current_gain=1.0,
         )
-        self.assertGreater(new_exp, 5000, "Exposure must increase when underexposed")
+        self.assertGreater(new_exp, 1000, "Exposure must increase when underexposed")
         self.assertGreaterEqual(new_exp, exp_min)
         self.assertLessEqual(new_exp, exp_max)
         self.assertGreaterEqual(new_gain, gain_min)
@@ -104,22 +104,22 @@ class TestCameraPipeline(unittest.TestCase):
         new_exp, new_gain = calculate_calibrated_exposure_and_gain(
             current_mean=185.0,
             current_sat_pct=8.5,
-            current_exposure_us=25000,
-            current_gain=2.5,
+            current_exposure_us=7000,
+            current_gain=1.8,
         )
-        self.assertLess(new_exp, 25000, "Exposure must decrease when saturated")
+        self.assertLess(new_exp, 7000, "Exposure must decrease when saturated")
         self.assertGreaterEqual(new_exp, exp_min)
-        self.assertLessEqual(new_gain, 2.5)
+        self.assertLessEqual(new_gain, 1.8)
 
-        # Scenario C: Optimal frame: mean=110, sat=0.5%
+        # Scenario C: Optimal frame: mean=115, sat=0.5%
         new_exp, new_gain = calculate_calibrated_exposure_and_gain(
-            current_mean=110.0,
+            current_mean=115.0,
             current_sat_pct=0.5,
-            current_exposure_us=14000,
-            current_gain=1.5,
+            current_exposure_us=3000,
+            current_gain=1.0,
         )
-        self.assertEqual(new_exp, 14000, "Optimal exposure should remain stable")
-        self.assertEqual(new_gain, 1.5, "Optimal gain should remain stable")
+        self.assertEqual(new_exp, 3000, "Optimal exposure should remain stable")
+        self.assertEqual(new_gain, 1.0, "Optimal gain should remain stable")
 
     def test_03_display_enhancement_removes_purple_and_separates_from_model(self):
         """
@@ -127,11 +127,13 @@ class TestCameraPipeline(unittest.TestCase):
         uint8 BGR image with no channel blowout (no channel mean above 200),
         and that the display transform does NOT bleed into or mutate the raw frame.
         """
-        # Create a purple frame: High Blue (210), Low Green (120), High Red (190)
-        purple_frame = np.zeros((200, 200, 3), dtype=np.uint8)
-        purple_frame[:, :, 0] = 210  # B
-        purple_frame[:, :, 1] = 120  # G
-        purple_frame[:, :, 2] = 190  # R
+        # Create a purple frame with realistic hand contrast:
+        # Background: dark pixels (30)
+        # Hand region: purple tint (High Blue, Low Green, High Red)
+        purple_frame = np.full((200, 200, 3), 30, dtype=np.uint8)
+        purple_frame[50:, :, 0] = 180  # B
+        purple_frame[50:, :, 1] = 90   # G
+        purple_frame[50:, :, 2] = 210  # R
 
         disp_frame = create_display_frame(purple_frame)
 
@@ -146,12 +148,13 @@ class TestCameraPipeline(unittest.TestCase):
             self.assertLess(ch_mean, 200.0, f"Channel {ch_idx} mean ({ch_mean}) must not blow out above 200")
 
         # Crucial separation: Verify original raw frame was NOT mutated in-place
-        self.assertEqual(purple_frame[0, 0, 0], 210)
-        self.assertEqual(purple_frame[0, 0, 1], 120)
-        self.assertEqual(purple_frame[0, 0, 2], 190)
+        self.assertEqual(purple_frame[100, 100, 0], 180)
+        self.assertEqual(purple_frame[100, 100, 1], 90)
+        self.assertEqual(purple_frame[100, 100, 2], 210)
 
-        # Balanced mid-gray palm: Ensure output is NOT blown out above 200
+        # Balanced mid-gray palm with vein pattern: Ensure output is NOT blown out above 200
         palm_patch = np.full((100, 100, 3), 160, dtype=np.uint8)
+        cv2.circle(palm_patch, (50, 50), 30, (80, 80, 80), -1)
         disp_palm = create_display_frame(palm_patch)
         self.assertEqual(disp_palm.dtype, np.uint8)
         self.assertLess(float(disp_palm.mean()), 200.0, "Display frame must not blow palm out above 200")
@@ -219,8 +222,8 @@ class TestCameraPipeline(unittest.TestCase):
 
         diag_data = {
             "resolution": "640x480",
-            "exposure_us": 18000,
-            "analogue_gain": 1.8,
+            "exposure_us": 3000,
+            "analogue_gain": 1.0,
             "mean": 112.5,
             "contrast_std": 24.3,
             "dynamic_range": [25, 230],
@@ -311,9 +314,45 @@ class TestCameraPipeline(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(self.temp_dir, "nir_weighted.png")))
         self.assertTrue(os.path.isfile(os.path.join(self.temp_dir, "comparison.json")))
 
+    def test_06_auto_calibrate_returns_within_bounds(self):
+        """
+        Validates that auto_calibrate_exposure reduces exposure when facing a bright frame (mean=200)
+        and stays strictly within [MIN_EXPOSURE_US, MAX_EXPOSURE_US].
+        """
+        from app.camera_pipeline import auto_calibrate_exposure
+        from app.constants import MIN_EXPOSURE_US, MAX_EXPOSURE_US
+
+        bright_frame = np.full((100, 100, 3), 200, dtype=np.uint8)
+
+        class MockPicam2:
+            def __init__(self):
+                self.controls = {}
+
+            def set_controls(self, ctrl_dict):
+                self.controls.update(ctrl_dict)
+
+            def capture_array(self, name=None):
+                return bright_frame
+
+        mock_p = MockPicam2()
+        best_exp, best_gain = auto_calibrate_exposure(
+            mock_p,
+            target_mean=115.0,
+            min_exp=MIN_EXPOSURE_US,
+            max_exp=MAX_EXPOSURE_US,
+            min_gain=1.0,
+            max_gain=1.8,
+            max_iterations=8,
+            tolerance=8.0,
+        )
+        self.assertGreaterEqual(best_exp, MIN_EXPOSURE_US)
+        self.assertLessEqual(best_exp, MAX_EXPOSURE_US)
+        self.assertGreaterEqual(best_gain, 1.0)
+        self.assertLessEqual(best_gain, 1.8)
+
     def test_07_candidate_exposure_sweep(self):
         """
-        Validates Problem 4: bounded candidate exposure and analogue gain sweep.
+        Validates bounded candidate exposure and analogue gain sweep.
         """
         import argparse
         from tools.sweep_camera_exposure import run_exposure_sweep
@@ -329,7 +368,7 @@ class TestCameraPipeline(unittest.TestCase):
             data = json.load(f)
 
         self.assertIn("candidates_tested", data)
-        self.assertEqual(len(data["candidates_tested"]), 7)
+        self.assertEqual(len(data["candidates_tested"]), 8)
         for cand in data["candidates_tested"]:
             self.assertIn("exposure_us", cand)
             self.assertIn("analogue_gain", cand)

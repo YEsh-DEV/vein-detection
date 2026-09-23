@@ -159,22 +159,45 @@ def init_hardware_camera():
         from picamera2 import Picamera2
         p = Picamera2()
         p.configure(p.create_preview_configuration(main={"size": (640, 480), "format": "XBGR8888"}))
-        p.start()
-        # Explicitly configure hardware controls for 850nm NoIR imaging:
-        # 1. Disable Auto White Balance (prevents daylight color gains from creating a pink/purple tint)
-        # 2. Lock neutral ColourGains (1.0, 1.0)
-        # 3. Lock calibrated exposure (14,000 µs) and gain (1.5)
+        # Initial safe low exposure to prevent saturation
         try:
             p.set_controls({
-                "AeEnable": False,
-                "AwbEnable": False,
-                "ColourGains": (1.0, 1.0),
-                "ExposureTime": 14000,
-                "AnalogueGain": 1.5,
+                "AeEnable":     False,
+                "AwbEnable":    False,
+                "ColourGains":  (1.0, 1.0),
+                "ExposureTime": 3000,
+                "AnalogueGain": 1.0,
             })
-            print(f"[+] Picamera2 camera hardware controls locked: Exposure=14000µs, Gain=1.5, AwbEnable=False")
         except Exception as ctrl_err:
             print(f"[!] Warning: Failed setting initial Picamera2 controls ({ctrl_err})")
+
+        p.start()
+        time.sleep(0.5)
+
+        # Auto-calibrate to find the right exposure for THIS LED setup
+        try:
+            from app.camera_pipeline import auto_calibrate_exposure
+        except ImportError:
+            from camera_pipeline import auto_calibrate_exposure
+
+        try:
+            best_exp, best_gain = auto_calibrate_exposure(
+                p,
+                target_mean=115.0,
+                min_exp=500,
+                max_exp=8000,
+                min_gain=1.0,
+                max_gain=1.0,
+                max_iterations=12,
+                tolerance=8.0
+            )
+            p.set_controls({
+                "ExposureTime": best_exp,
+                "AnalogueGain": best_gain,
+            })
+            print(f"[Camera] Auto-calibrated: {best_exp}µs @ gain {best_gain:.1f}")
+        except Exception as cal_err:
+            print(f"[!] Warning: Auto-calibration failed ({cal_err}), using 3000µs @ gain 1.0")
 
         picam2 = p
         CAMERA_AVAILABLE = True

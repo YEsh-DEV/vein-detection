@@ -109,11 +109,74 @@ def extract_nir_channel(frame: np.ndarray, method: Optional[str] = None) -> np.n
 # ---------------------------------------------------------------------------
 # 2. Display-Only Enhancement Pipeline (Human-Readable UI)
 # ---------------------------------------------------------------------------
+def auto_calibrate_exposure(picam2, target_mean=115.0,
+                             min_exp=500, max_exp=8000,
+                             min_gain=1.0, max_gain=1.8,
+                             max_iterations=12, tolerance=8.0):
+    """
+    Binary-search auto-calibration for overexposed LED setups.
+    Finds the lowest exposure where palm mean lands in target range.
+    Runs once at startup before the main server loop.
+    Returns (best_exposure_us, best_gain).
+    """
+    import time
+    low_exp  = min_exp
+    high_exp = max_exp
+    best_exp  = min_exp
+    best_gain = min_gain
+
+    for iteration in range(max_iterations):
+        mid_exp = int((low_exp + high_exp) / 2)
+        picam2.set_controls({
+            "AeEnable":      False,
+            "AwbEnable":     False,
+            "ColourGains":   (1.0, 1.0),
+            "ExposureTime":  mid_exp,
+            "AnalogueGain":  min_gain,
+        })
+        time.sleep(0.18)   # allow sensor to settle
+
+        try:
+            frame = picam2.capture_array()
+        except TypeError:
+            frame = picam2.capture_array("main")
+        if frame is None:
+            break
+        # Convert to BGR if needed
+        if frame.ndim == 3 and frame.shape[2] == 3:
+            bgr = frame[:, :, ::-1].copy()
+        else:
+            bgr = frame
+
+        nir = (0.50 * bgr[:, :, 2].astype(np.float32)
+             + 0.25 * bgr[:, :, 1].astype(np.float32)
+             + 0.25 * bgr[:, :, 0].astype(np.float32))
+        current_mean = float(np.mean(nir))
+
+        print(f"[AutoCal] iter={iteration+1:2d}  exp={mid_exp:5d}µs  "
+              f"gain={min_gain:.1f}  mean={current_mean:.1f}")
+
+        if abs(current_mean - target_mean) <= tolerance:
+            best_exp  = mid_exp
+            best_gain = min_gain
+            break
+        elif current_mean > target_mean:
+            high_exp = mid_exp       # too bright → reduce
+        else:
+            low_exp  = mid_exp       # too dark  → increase
+
+        best_exp  = mid_exp
+        best_gain = min_gain
+
+    print(f"[AutoCal] Final: {best_exp}µs @ gain {best_gain:.1f}  "
+          f"(target mean={target_mean})")
+    return best_exp, best_gain
+
+
 def create_display_frame(raw_bgr: np.ndarray, method: Optional[str] = None) -> np.ndarray:
     """
-    Display pipeline for 850nm NIR NoIR camera.
-    NO homomorphic division — that inverts contrast on this hardware.
-    Uses percentile normalization + mild CLAHE only.
+    Display pipeline for overexposed 850nm LED NIR setup.
+    Pure percentile normalization + CLAHE. No homomorphic division.
     """
     if raw_bgr is None:
         return None
@@ -121,42 +184,37 @@ def create_display_frame(raw_bgr: np.ndarray, method: Optional[str] = None) -> n
     if raw_bgr.ndim == 2:
         nir = raw_bgr.astype(np.float32)
     else:
-        # Step 1: Extract NIR-weighted channel (R=0.50, G=0.25, B=0.25)
         b = raw_bgr[:, :, 0].astype(np.float32)
         g = raw_bgr[:, :, 1].astype(np.float32)
         r = raw_bgr[:, :, 2].astype(np.float32)
-        nir = (0.50 * r + 0.25 * g + 0.25 * b)
+        nir = 0.50 * r + 0.25 * g + 0.25 * b
 
-    # Step 2: Percentile-clipped normalization
-    # P3 to P92 keeps palm mid-tones in 80-160 range without blowout
-    lo = np.percentile(nir, DISPLAY_PERCENTILE_LOW)    # 3.0
-    hi = np.percentile(nir, DISPLAY_PERCENTILE_HIGH)   # 92.0
+    lo = np.percentile(nir, DISPLAY_PERCENTILE_LOW)
+    hi = np.percentile(nir, DISPLAY_PERCENTILE_HIGH)
     if hi - lo < 15:
         hi = lo + 15
     nir_norm = np.clip(
         (nir - lo) / (hi - lo) * 255.0, 0, 255
     ).astype(np.uint8)
 
-    # Step 3: Mild CLAHE — enhances vein structure without amplifying noise
-    clahe = cv2.createCLAHE(
-        clipLimit=DISPLAY_CLAHE_CLIP,      # 1.5
-        tileGridSize=DISPLAY_CLAHE_GRID    # (8, 8)
-    )
-    enhanced = clahe.apply(nir_norm)
+    # Invert: in NIR reflectance mode veins are DARKER than tissue.
+    # Inverting makes veins appear as bright lines on dark background
+    # which is easier for both human operators AND MediaPipe to detect.
+    nir_inv = 255 - nir_norm
 
-    # Step 4: Very light denoise to reduce sensor noise
+    clahe = cv2.createCLAHE(
+        clipLimit=DISPLAY_CLAHE_CLIP,
+        tileGridSize=DISPLAY_CLAHE_GRID
+    )
+    enhanced = clahe.apply(nir_inv)
     enhanced = cv2.GaussianBlur(enhanced, (3, 3), 0)
 
-    # Step 5: Convert to BGR and add guide box
     display = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
     h, w = display.shape[:2]
-    bx1 = int(w * 0.15)
-    by1 = int(h * 0.05)
-    bx2 = int(w * 0.85)
-    by2 = int(h * 0.95)
+    bx1, by1 = int(w * 0.15), int(h * 0.05)
+    bx2, by2 = int(w * 0.85), int(h * 0.95)
     corner_len = min(22, max(5, int(w * 0.1)))
-    col = (0, 220, 0)
-    thick = 2
+    col, thick = (0, 220, 0), 2
     for cx, cy in [(bx1, by1), (bx2, by1), (bx1, by2), (bx2, by2)]:
         dx = corner_len if cx == bx1 else -corner_len
         dy = corner_len if cy == by1 else -corner_len
