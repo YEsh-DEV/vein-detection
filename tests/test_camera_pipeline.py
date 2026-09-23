@@ -115,10 +115,10 @@ class TestCameraPipeline(unittest.TestCase):
         new_exp, new_gain = calculate_calibrated_exposure_and_gain(
             current_mean=115.0,
             current_sat_pct=0.5,
-            current_exposure_us=6000,
+            current_exposure_us=4000,
             current_gain=1.0,
         )
-        self.assertEqual(new_exp, 6000, "Optimal exposure should remain stable")
+        self.assertEqual(new_exp, 4000, "Optimal exposure should remain stable")
         self.assertEqual(new_gain, 1.0, "Optimal gain should remain stable")
 
     def test_03_display_enhancement_removes_purple_and_separates_from_model(self):

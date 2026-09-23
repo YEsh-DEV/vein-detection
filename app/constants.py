@@ -58,7 +58,7 @@ DEBUG_FRAMES_DIR = os.path.join(PROJECT_ROOT, "debug_frames")
 # Camera & Optical Pipeline Tuning Constants (NoIR Sensor Calibration)
 # ---------------------------------------------------------------------------
 # Candidate exposure and gain settings for Raspberry Pi OV5647 NoIR with 850nm IR LEDs.
-DEFAULT_EXPOSURE_US = int(os.environ.get("CAMERA_EXPOSURE_US", "6000"))
+DEFAULT_EXPOSURE_US = int(os.environ.get("CAMERA_EXPOSURE_US", "4000"))
 DEFAULT_ANALOGUE_GAIN = float(os.environ.get("CAMERA_GAIN", "1.0"))
 
 MIN_EXPOSURE_US = 1000
@@ -96,8 +96,8 @@ NIR_EXTRACTION_METHOD = os.environ.get("NIR_EXTRACTION_METHOD", "weighted_nir").
 
 # Display-Only Percentile-Clipped Normalization & Gentle CLAHE
 DISPLAY_PERCENTILE_LOW = 2.0
-DISPLAY_PERCENTILE_HIGH = 96.0
-DISPLAY_CLAHE_CLIP = 1.8
+DISPLAY_PERCENTILE_HIGH = 93.0
+DISPLAY_CLAHE_CLIP = 2.0
 DISPLAY_CLAHE_GRID = (8, 8)
 
 # Quality gate bounds for palm illumination
