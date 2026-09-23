@@ -34,7 +34,7 @@ import mimetypes
 
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
@@ -46,11 +46,17 @@ if _PROJECT_ROOT not in sys.path:
 try:
     from app.constants import (
         PROJECT_ROOT, STATIC_DIR, CAPTURE_DIR, ROI_DIR, MODEL_PATH,
-        LOGS_DIR, SCAN_DIAGNOSTICS_LOG,
+        LOGS_DIR, SCAN_DIAGNOSTICS_LOG, CAPTURE_DIAGNOSTICS_LOG,
         MATCH_THRESHOLD, ENROLL_CONSISTENCY_THRESHOLD,
         ENROLL_SAMPLE_MIN, ENROLL_SAMPLE_MAX, ENROLLMENT_CACHE_TTL,
         BIOMETRIC_ENGINE, DEBUG_DIAGNOSTICS_MODE, DEBUG_FRAMES_DIR,
+        CODE_HAND_TOO_CLOSE, CODE_HAND_TOO_FAR, CODE_HAND_OUTSIDE_FRAME,
+        CODE_MEDIAPIPE_NO_LANDMARKS, CODE_INVALID_LANDMARKS,
+        CODE_VALLEY_EXTRACTION_FAILED, CODE_ROI_EXTRACTION_FAILED,
+        CODE_QUALITY_LOW_CONTRAST, CODE_QUALITY_EXCESSIVE_PADDING,
+        CODE_MODEL_NOT_LOADED, CODE_CAMERA_ERROR, CODE_UNKNOWN_PIPELINE_ERROR,
     )
+    from app.capture_errors import CaptureError, ERROR_PRIORITY
     from app.db_manager import (
         init_db, enroll_user, user_exists, list_users,
         delete_user, log_access, get_all_embeddings,
@@ -68,11 +74,17 @@ try:
 except ImportError:
     from constants import (
         PROJECT_ROOT, STATIC_DIR, CAPTURE_DIR, ROI_DIR, MODEL_PATH,
-        LOGS_DIR, SCAN_DIAGNOSTICS_LOG,
+        LOGS_DIR, SCAN_DIAGNOSTICS_LOG, CAPTURE_DIAGNOSTICS_LOG,
         MATCH_THRESHOLD, ENROLL_CONSISTENCY_THRESHOLD,
         ENROLL_SAMPLE_MIN, ENROLL_SAMPLE_MAX, ENROLLMENT_CACHE_TTL,
         BIOMETRIC_ENGINE, DEBUG_DIAGNOSTICS_MODE, DEBUG_FRAMES_DIR,
+        CODE_HAND_TOO_CLOSE, CODE_HAND_TOO_FAR, CODE_HAND_OUTSIDE_FRAME,
+        CODE_MEDIAPIPE_NO_LANDMARKS, CODE_INVALID_LANDMARKS,
+        CODE_VALLEY_EXTRACTION_FAILED, CODE_ROI_EXTRACTION_FAILED,
+        CODE_QUALITY_LOW_CONTRAST, CODE_QUALITY_EXCESSIVE_PADDING,
+        CODE_MODEL_NOT_LOADED, CODE_CAMERA_ERROR, CODE_UNKNOWN_PIPELINE_ERROR,
     )
+    from capture_errors import CaptureError, ERROR_PRIORITY
     from db_manager import (
         init_db, enroll_user, user_exists, list_users,
         delete_user, log_access, get_all_embeddings,
@@ -346,17 +358,26 @@ def process_image_with_timing(gray: np.ndarray):
     """
     Extract CLAHE ROI and AMPVNet CNN embedding from a grayscale hand frame while capturing
     granular per-stage latency (landmark detection, ROI alignment/CLAHE, CNN embedding extraction).
-    Raises ValueError if palm landmarks or valleys cannot be detected.
+    Raises CaptureError if palm landmarks, knuckle valleys, or ROI cannot be detected.
     """
     t_land0 = time.time()
     stretched = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
     landmarks = detect_hand_landmarks(stretched, landmarker)
     if landmarks is None or len(landmarks) < 21:
-        raise ValueError("No hand landmarks detected. Hold palm flat ~10-15cm above camera.")
+        raise CaptureError(
+            error_code=CODE_MEDIAPIPE_NO_LANDMARKS,
+            instruction="Hand landmarks not detected. Hold palm flat ~10-15cm above camera.",
+            stage="mediapipe"
+        )
 
     pv1, pv2 = extract_valleys_from_landmarks(landmarks)
     if pv1 is None or pv2 is None:
-        raise ValueError("Cannot detect finger valley landmarks. Spread fingers slightly.")
+        raise CaptureError(
+            error_code=CODE_VALLEY_EXTRACTION_FAILED,
+            instruction="Cannot detect finger valley landmarks. Spread fingers slightly.",
+            stage="valleys",
+            diagnostics={"landmarks_count": len(landmarks)}
+        )
     t_landmark_ms = round((time.time() - t_land0) * 1000, 2)
 
     t_roi0 = time.time()
@@ -367,7 +388,11 @@ def process_image_with_timing(gray: np.ndarray):
         landmarks_px=landmarks
     )
     if roi_224 is None or roi_224.size == 0:
-        raise ValueError("Failed to extract palm ROI bounding box.")
+        raise CaptureError(
+            error_code=CODE_ROI_EXTRACTION_FAILED,
+            instruction="Failed to extract palm ROI bounding box.",
+            stage="roi"
+        )
 
     clahe_roi = enhance_roi_vessels(roi_224)
     t_roi_ms = round((time.time() - t_roi0) * 1000, 2)
@@ -410,17 +435,28 @@ def process_enrollment_sample(gray: np.ndarray):
       3. Valid 224x224 dimensions
       4. Contrast std >= 10.0
       5. Embedding L2 norm == 1.0 +- 1e-3
-    Raises ValueError with actionable user guidance if quality check fails.
+    Raises CaptureError with actionable machine-readable code & UI guidance if check fails.
     """
     stretched = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
     diag_res = detect_hand_landmarks_with_diagnostics(stretched, landmarker)
     if not diag_res["success"]:
-        raise ValueError(diag_res["instruction"])
+        stage = "positioning" if diag_res["reason"] in (CODE_HAND_TOO_CLOSE, CODE_HAND_TOO_FAR, CODE_HAND_OUTSIDE_FRAME) else "mediapipe"
+        raise CaptureError(
+            error_code=diag_res["reason"],
+            instruction=diag_res["instruction"],
+            stage=stage,
+            diagnostics=diag_res.get("diagnostics")
+        )
 
     landmarks = diag_res["landmarks"]
     pv1, pv2 = extract_valleys_from_landmarks(landmarks)
     if pv1 is None or pv2 is None:
-        raise ValueError("Cannot detect finger valleys. Spread fingers slightly and hold palm flat.")
+        raise CaptureError(
+            error_code=CODE_VALLEY_EXTRACTION_FAILED,
+            instruction="Cannot detect finger valleys. Spread fingers slightly and hold palm flat.",
+            stage="valleys",
+            diagnostics={"landmarks_count": len(landmarks)}
+        )
 
     hand_mask = segment_hand(stretched)
     roi_224, bbox, _ = extract_ma2017_scaled_roi(
@@ -429,13 +465,28 @@ def process_enrollment_sample(gray: np.ndarray):
         landmarks_px=landmarks
     )
     if roi_224 is None or roi_224.size == 0:
-        raise ValueError("Failed to extract palm ROI bounding box.")
+        raise CaptureError(
+            error_code=CODE_ROI_EXTRACTION_FAILED,
+            instruction="Failed to extract palm ROI bounding box.",
+            stage="roi"
+        )
 
     # Phase 3 Quality Gate
     quality = compute_roi_quality(roi_224, bbox, stretched.shape)
     if not quality["is_valid"]:
         reasons_str = "; ".join(quality["reasons"])
-        raise ValueError(f"Quality gate rejected sample: {reasons_str}. Please reposition palm.")
+        err_code = quality.get("error_code") or (CODE_QUALITY_EXCESSIVE_PADDING if quality["pad_pct"] > 0.25 else CODE_QUALITY_LOW_CONTRAST)
+        raise CaptureError(
+            error_code=err_code,
+            instruction=f"Quality gate rejected sample: {reasons_str}. Please reposition palm.",
+            stage="quality_gate",
+            diagnostics={
+                "pad_pct": quality["pad_pct"],
+                "contrast_std": quality["contrast_std"],
+                "mean_intensity": quality["mean_intensity"],
+                "reasons": quality["reasons"],
+            }
+        )
 
     clahe_roi = enhance_roi_vessels(roi_224)
     embedding = extract_embedding(clahe_roi)
@@ -443,7 +494,12 @@ def process_enrollment_sample(gray: np.ndarray):
     # Embedding L2 norm check
     norm_val = float(np.linalg.norm(embedding))
     if abs(norm_val - 1.0) > 1e-3:
-        raise ValueError(f"Degenerate embedding norm ({norm_val:.4f} != 1.0). Please re-capture.")
+        raise CaptureError(
+            error_code=CODE_UNKNOWN_PIPELINE_ERROR,
+            instruction=f"Degenerate embedding norm ({norm_val:.4f} != 1.0). Please re-capture.",
+            stage="cnn_embedding",
+            diagnostics={"norm": norm_val}
+        )
 
     return clahe_roi, embedding, quality
 
@@ -545,6 +601,143 @@ def log_scan_diagnostic(
             f.write(json.dumps(entry) + "\n")
     except Exception as e:
         print(f"[!] Warning: Failed writing to scan_diagnostics.jsonl: {e}")
+
+
+def log_capture_failure_diagnostic(
+    error: CaptureError,
+    attempts: int = 1,
+    attempt_details: list = None
+):
+    """
+    Appends a structured JSON line to logs/capture_diagnostics.jsonl for dev diagnostics (Task 4).
+    Never exposes internal tracebacks to the client.
+    Captures:
+      - timestamp
+      - stage
+      - error_code
+      - instruction
+      - occupancy
+      - border_touches
+      - contrast
+      - padding
+      - mediapipe_landmarks (bool)
+      - roi_status (str)
+      - attempts_total
+      - attempt_details
+    """
+    try:
+        os.makedirs(LOGS_DIR, exist_ok=True)
+        diag = getattr(error, "diagnostics", {}) or {}
+        if not isinstance(diag, dict):
+            diag = {}
+
+        # Determine MediaPipe landmark detection status
+        stage = getattr(error, "stage", "pipeline")
+        if "landmarks_count" in diag:
+            has_landmarks = bool(diag["landmarks_count"] >= 21)
+        elif stage in ("valleys", "roi", "quality_gate", "cnn_embedding"):
+            has_landmarks = True
+        else:
+            has_landmarks = False
+
+        # Determine ROI status
+        if stage == "quality_gate":
+            roi_status = "rejected_quality"
+        elif stage in ("positioning", "mediapipe", "valleys", "camera", "model"):
+            roi_status = "not_reached"
+        elif stage == "roi":
+            roi_status = "failed_extraction"
+        else:
+            roi_status = "extracted"
+
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "stage": stage,
+            "error_code": getattr(error, "error_code", CODE_UNKNOWN_PIPELINE_ERROR),
+            "instruction": getattr(error, "instruction", str(error)),
+            "occupancy": float(diag.get("occupancy_pct", 0.0)),
+            "border_touches": int(diag.get("border_touches", 0)),
+            "contrast": float(diag.get("contrast_std", 0.0)),
+            "padding": float(diag.get("pad_pct", 0.0)),
+            "mediapipe_landmarks": has_landmarks,
+            "roi_status": roi_status,
+            "attempts_total": attempts,
+            "attempt_details": attempt_details or [],
+        }
+
+        with open(CAPTURE_DIAGNOSTICS_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        print(f"[!] Warning: Failed writing to capture_diagnostics.jsonl: {e}")
+
+
+def capture_burst_and_process_enrollment(
+    uname: str,
+    max_frames: int = 5,
+    frame_interval_s: float = 0.08
+):
+    """
+    Acquires a short sequence of frames (e.g. up to 5 frames over ~0.5s–0.8s) during enrollment.
+    Attempts processing on consecutive frames and stops at the very FIRST frame that passes:
+      - positioning heuristic
+      - MediaPipe 21 landmarks
+      - knuckle valley extraction
+      - canonical ROI extraction
+      - strict quality gates (contrast >= 10.0, padding <= 25%, valid 224x224)
+      - L2-normalized 512-D embedding
+    Returns (gray, clahe_roi, embedding, quality, attempt_idx) on first success.
+    If all candidate frames fail, aggregates diagnostics, logs the failure event, and raises
+    the most actionable CaptureError to guide the user.
+    """
+    if not CAMERA_AVAILABLE:
+        err = CaptureError(
+            error_code=CODE_CAMERA_ERROR,
+            instruction="Camera hardware not available. Check camera connection.",
+            stage="camera",
+            diagnostics={"camera_available": False, "detail": CAMERA_ERROR_DETAIL}
+        )
+        log_capture_failure_diagnostic(err, attempts=0, attempt_details=[err.to_dict()])
+        raise err
+
+    attempt_errors = []
+
+    for attempt_idx in range(1, max_frames + 1):
+        try:
+            gray = capture_frame_gray()
+            clahe_roi, embedding, quality = process_enrollment_sample(gray)
+            return gray, clahe_roi, embedding, quality, attempt_idx
+        except CaptureError as ce:
+            attempt_errors.append(ce)
+        except Exception as ex:
+            attempt_errors.append(
+                CaptureError(
+                    error_code=CODE_UNKNOWN_PIPELINE_ERROR,
+                    instruction=f"Pipeline error: {ex}",
+                    stage="pipeline",
+                    diagnostics={"error": str(ex)}
+                )
+            )
+
+        if attempt_idx < max_frames:
+            time.sleep(frame_interval_s)
+
+    # All frames failed — select the most informative error based on priority
+    if attempt_errors:
+        chosen_error = max(attempt_errors, key=lambda e: getattr(e, "priority", 10))
+    else:
+        chosen_error = CaptureError(
+            error_code=CODE_UNKNOWN_PIPELINE_ERROR,
+            instruction="No valid frames acquired during burst.",
+            stage="pipeline"
+        )
+
+    log_capture_failure_diagnostic(
+        error=chosen_error,
+        attempts=len(attempt_errors),
+        attempt_details=[e.to_dict() if hasattr(e, "to_dict") else {"detail": str(e)} for e in attempt_errors]
+    )
+
+    raise chosen_error
 
 
 # ---------------------------------------------------------------------------
@@ -655,7 +848,14 @@ async def scan_palm():
     try:
         gray = await run_in_threadpool(capture_frame_gray)
     except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        err = CaptureError(
+            error_code=CODE_CAMERA_ERROR,
+            instruction="Camera hardware not available.",
+            stage="camera",
+            diagnostics={"detail": str(e)}
+        )
+        log_capture_failure_diagnostic(err, attempts=1, attempt_details=[err.to_dict()])
+        return JSONResponse(status_code=503, content=err.to_dict())
     t_capture_ms = round((time.time() - t_cap0) * 1000, 2)
 
     try:
@@ -664,14 +864,33 @@ async def scan_palm():
             timeout=15.0
         )
     except asyncio.TimeoutError:
-        raise HTTPException(
-            status_code=504,
-            detail="Landmark detection timeout. Ensure hand is steady and properly illuminated."
+        err = CaptureError(
+            error_code="PIPELINE_TIMEOUT",
+            instruction="Landmark detection timeout. Ensure hand is steady and properly illuminated.",
+            stage="pipeline"
         )
+        log_capture_failure_diagnostic(err, attempts=1, attempt_details=[err.to_dict()])
+        return JSONResponse(status_code=504, content=err.to_dict())
+    except CaptureError as e:
+        log_capture_failure_diagnostic(e, attempts=1, attempt_details=[e.to_dict()])
+        return JSONResponse(status_code=400, content=e.to_dict())
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        err = CaptureError(
+            error_code=CODE_UNKNOWN_PIPELINE_ERROR,
+            instruction=str(e),
+            stage="pipeline"
+        )
+        log_capture_failure_diagnostic(err, attempts=1, attempt_details=[err.to_dict()])
+        return JSONResponse(status_code=400, content=err.to_dict())
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Pipeline error: {e}")
+        err = CaptureError(
+            error_code=CODE_UNKNOWN_PIPELINE_ERROR,
+            instruction=f"Pipeline error: {e}",
+            stage="pipeline",
+            diagnostics={"error": str(e)}
+        )
+        log_capture_failure_diagnostic(err, attempts=1, attempt_details=[err.to_dict()])
+        return JSONResponse(status_code=400, content=err.to_dict())
 
     try:
         search_diag = await asyncio.wait_for(
@@ -768,25 +987,31 @@ async def enroll_sample(req: SampleReq):
             detail=f"Maximum {ENROLL_SAMPLE_MAX} samples reached. Save enrollment or clear and restart."
         )
 
+    # Multi-Frame Burst Capture (Task 3: Tolerant to momentary single-frame fluctuations)
     try:
-        gray = await run_in_threadpool(capture_frame_gray)
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
-
-    try:
-        clahe_roi, embedding, quality = await asyncio.wait_for(
-            run_in_threadpool(process_enrollment_sample, gray),
-            timeout=15.0
+        gray, clahe_roi, embedding, quality, sample_attempt = await asyncio.wait_for(
+            run_in_threadpool(capture_burst_and_process_enrollment, uname, 5, 0.08),
+            timeout=20.0
         )
     except asyncio.TimeoutError:
-        raise HTTPException(
-            status_code=504,
-            detail="Pipeline timeout. Move hand closer to camera and ensure good lighting."
+        err = CaptureError(
+            error_code="PIPELINE_TIMEOUT",
+            instruction="Pipeline timeout during multi-frame acquisition. Hold hand steady and ensure good lighting.",
+            stage="pipeline"
         )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        log_capture_failure_diagnostic(err, attempts=5, attempt_details=[err.to_dict()])
+        return JSONResponse(status_code=504, content=err.to_dict())
+    except CaptureError as e:
+        return JSONResponse(status_code=400, content=e.to_dict())
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Quality check error: {e}")
+        err = CaptureError(
+            error_code=CODE_UNKNOWN_PIPELINE_ERROR,
+            instruction=f"Quality check error: {e}",
+            stage="pipeline",
+            diagnostics={"error": str(e)}
+        )
+        log_capture_failure_diagnostic(err, attempts=1, attempt_details=[err.to_dict()])
+        return JSONResponse(status_code=400, content=err.to_dict())
 
     current_samples.append(embedding)
     sample_idx = len(current_samples)

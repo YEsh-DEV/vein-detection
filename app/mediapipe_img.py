@@ -25,9 +25,33 @@ except ImportError:
     MEDIAPIPE_AVAILABLE = False
 
 try:
-    from app.constants import MODEL_PATH
+    from app.constants import (
+        MODEL_PATH,
+        CODE_HAND_TOO_CLOSE,
+        CODE_HAND_TOO_FAR,
+        CODE_HAND_OUTSIDE_FRAME,
+        CODE_MEDIAPIPE_NO_LANDMARKS,
+        CODE_INVALID_LANDMARKS,
+        CODE_VALLEY_EXTRACTION_FAILED,
+        CODE_ROI_EXTRACTION_FAILED,
+        CODE_QUALITY_LOW_CONTRAST,
+        CODE_QUALITY_EXCESSIVE_PADDING,
+    )
+    from app.capture_errors import CaptureError
 except ImportError:
-    from constants import MODEL_PATH
+    from constants import (
+        MODEL_PATH,
+        CODE_HAND_TOO_CLOSE,
+        CODE_HAND_TOO_FAR,
+        CODE_HAND_OUTSIDE_FRAME,
+        CODE_MEDIAPIPE_NO_LANDMARKS,
+        CODE_INVALID_LANDMARKS,
+        CODE_VALLEY_EXTRACTION_FAILED,
+        CODE_ROI_EXTRACTION_FAILED,
+        CODE_QUALITY_LOW_CONTRAST,
+        CODE_QUALITY_EXCESSIVE_PADDING,
+    )
+    from capture_errors import CaptureError
 
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
 
@@ -74,6 +98,12 @@ def diagnose_hand_positioning(gray_img: np.ndarray) -> dict:
       - INSUFFICIENT_VISIBILITY: Low contrast or underexposed NIR capture.
       - NORMAL: Hand occupies appropriate central area (~20-50% of frame).
     """
+    if gray_img.ndim == 3:
+        if gray_img.shape[2] == 3:
+            gray_img = cv2.cvtColor(gray_img, cv2.COLOR_BGR2GRAY)
+        elif gray_img.shape[2] == 1:
+            gray_img = gray_img.squeeze(-1)
+
     h, w = gray_img.shape[:2]
     total_px = h * w
 
@@ -135,7 +165,14 @@ def detect_hand_landmarks_with_diagnostics(gray_img: np.ndarray, landmarker) -> 
       - 'instruction': human-readable positioning guidance for kiosk UI
       - 'diagnostics': pre-landmark heuristic stats (occupancy, borders, contrast)
     """
-    if gray_img.shape[0] < 200 or gray_img.shape[1] < 200:
+    if gray_img.ndim == 3 and gray_img.shape[2] == 3:
+        gray = cv2.cvtColor(gray_img, cv2.COLOR_BGR2GRAY)
+    elif gray_img.ndim == 3 and gray_img.shape[2] == 1:
+        gray = gray_img.squeeze(-1)
+    else:
+        gray = gray_img
+
+    if gray.shape[0] < 200 or gray.shape[1] < 200:
         return {
             "success": False,
             "landmarks": None,
@@ -144,31 +181,34 @@ def detect_hand_landmarks_with_diagnostics(gray_img: np.ndarray, landmarker) -> 
             "diagnostics": {}
         }
 
-    diag = diagnose_hand_positioning(gray_img)
+    diag = diagnose_hand_positioning(gray)
 
     if isinstance(landmarker, str):
         landmarker = build_landmarker(landmarker)
 
-    rgb = cv2.cvtColor(gray_img, cv2.COLOR_GRAY2RGB)
+    rgb = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
     result = landmarker.detect(mp_image)
 
     if not result.hand_landmarks:
         # Heuristic failure classification
-        if diag["reason"] in ("HAND_TOO_CLOSE", "HAND_TOO_FAR", "HAND_OUTSIDE_FRAME", "INSUFFICIENT_VISIBILITY"):
+        if diag["reason"] in (CODE_HAND_TOO_CLOSE, CODE_HAND_TOO_FAR, CODE_HAND_OUTSIDE_FRAME):
             fail_reason = diag["reason"]
             fail_instruction = diag["instruction"]
+        elif diag["reason"] == "INSUFFICIENT_VISIBILITY":
+            fail_reason = CODE_QUALITY_LOW_CONTRAST
+            fail_instruction = "Lighting or contrast too low. Ensure proper illumination and hold hand steady."
         else:
             # MediaPipe failed despite normal occupancy (e.g. boundary clip or orientation)
             if diag["borders"]["top"] or diag["borders"]["bottom"] or diag["occupancy_pct"] > 45.0:
-                fail_reason = "HAND_TOO_CLOSE"
-                fail_instruction = "Hand is too close or fingers cropped — move hand slightly farther."
+                fail_reason = CODE_HAND_TOO_CLOSE
+                fail_instruction = "Hand is too close or fingers cropped — move hand slightly farther (~10-15cm)."
             elif diag["borders"]["left"] or diag["borders"]["right"]:
-                fail_reason = "HAND_OUTSIDE_FRAME"
-                fail_instruction = "Hand off-center — align palm within the center guide."
+                fail_reason = CODE_HAND_OUTSIDE_FRAME
+                fail_instruction = "Hand off-center — center palm within the guide frame."
             else:
-                fail_reason = "UNKNOWN_POSITIONING"
-                fail_instruction = "Hold palm flat with fingers slightly spread ~10-15cm above camera."
+                fail_reason = CODE_MEDIAPIPE_NO_LANDMARKS
+                fail_instruction = "Hand landmarks not detected. Hold palm flat with fingers slightly spread ~10-15cm above camera."
 
         return {
             "success": False,
@@ -180,6 +220,15 @@ def detect_hand_landmarks_with_diagnostics(gray_img: np.ndarray, landmarker) -> 
 
     h, w = gray_img.shape[:2]
     landmarks = [(int(lm.x * w), int(lm.y * h)) for lm in result.hand_landmarks[0]]
+    if len(landmarks) < 21:
+        return {
+            "success": False,
+            "landmarks": None,
+            "reason": CODE_INVALID_LANDMARKS,
+            "instruction": "Incomplete hand landmarks. Hold palm flat and keep fingers visible.",
+            "diagnostics": diag
+        }
+
     return {
         "success": True,
         "landmarks": landmarks,
@@ -193,11 +242,17 @@ def detect_hand_landmarks(gray_img: np.ndarray, landmarker) -> list:
     """
     Runs MediaPipe HandLandmarker and returns all 21 (x, y) coordinates.
     Accepts either an active HandLandmarker instance or a model_path string.
-    Raises ValueError with specific positioning instruction if landmarks cannot be detected.
+    Raises CaptureError with specific positioning instruction and error_code if landmarks cannot be detected.
     """
     res = detect_hand_landmarks_with_diagnostics(gray_img, landmarker)
     if not res["success"]:
-        raise ValueError(res["instruction"])
+        stage = "positioning" if res["reason"] in (CODE_HAND_TOO_CLOSE, CODE_HAND_TOO_FAR, CODE_HAND_OUTSIDE_FRAME) else "mediapipe"
+        raise CaptureError(
+            error_code=res["reason"],
+            instruction=res["instruction"],
+            stage=stage,
+            diagnostics=res.get("diagnostics")
+        )
     return res["landmarks"]
 
 
@@ -206,6 +261,7 @@ def compute_roi_quality(roi_224: np.ndarray, bbox: tuple, frame_shape: tuple) ->
     Evaluates extracted 224x224 palm ROI against strict biometric quality bounds (Phase 3).
     Returns dict:
       - 'is_valid': bool
+      - 'error_code': Optional[str]
       - 'pad_pct': float (percentage of ROI area derived from border padding)
       - 'contrast_std': float (intensity standard deviation across vessels)
       - 'mean_intensity': float
@@ -228,16 +284,21 @@ def compute_roi_quality(roi_224: np.ndarray, bbox: tuple, frame_shape: tuple) ->
     mean_val = float(np.mean(roi_224))
 
     reasons = []
+    error_code = None
     if pad_pct > 0.25:
         reasons.append(f"Excessive boundary padding ({pad_pct*100:.1f}% > 25.0% max)")
-    if contrast_std < 10.0:
+        error_code = CODE_QUALITY_EXCESSIVE_PADDING
+    elif contrast_std < 10.0:
         reasons.append(f"Low vessel contrast (std={contrast_std:.1f} < 10.0 min)")
-    if roi_224.shape != (224, 224):
+        error_code = CODE_QUALITY_LOW_CONTRAST
+    elif roi_224.shape != (224, 224):
         reasons.append(f"Invalid ROI dimensions ({roi_224.shape} != 224x224)")
+        error_code = CODE_ROI_EXTRACTION_FAILED
 
     return {
         "is_valid": len(reasons) == 0,
         "valid": len(reasons) == 0,
+        "error_code": error_code,
         "pad_pct": round(pad_pct, 4),
         "contrast_std": round(contrast_std, 2),
         "mean_intensity": round(mean_val, 2),
@@ -323,7 +384,12 @@ def extract_ma2017_scaled_roi(gray_img: np.ndarray, pv1: tuple, pv2: tuple,
     mid_x = (pv1[0] + pv2[0]) / 2.0
     mid_y = (pv1[1] + pv2[1]) / 2.0
 
-    h, w = gray_img.shape
+    if gray_img.ndim == 3 and gray_img.shape[2] == 3:
+        gray_img = cv2.cvtColor(gray_img, cv2.COLOR_BGR2GRAY)
+    elif gray_img.ndim == 3 and gray_img.shape[2] == 1:
+        gray_img = gray_img.squeeze(-1)
+
+    h, w = gray_img.shape[:2]
     M            = cv2.getRotationMatrix2D((mid_x, mid_y), angle_deg, 1.0)
     rotated_gray = cv2.warpAffine(gray_img, M, (w, h), flags=cv2.INTER_LINEAR)
 
@@ -377,7 +443,12 @@ def extract_ma2017_scaled_roi(gray_img: np.ndarray, pv1: tuple, pv2: tuple,
         roi_patch = rotated_gray[y1:y2, x1:x2]
 
     if roi_patch.size == 0 or roi_patch.shape[0] < 10 or roi_patch.shape[1] < 10:
-        raise ValueError("Invalid ROI bounding box coordinates.")
+        raise CaptureError(
+            error_code=CODE_ROI_EXTRACTION_FAILED,
+            instruction="Failed to extract palm ROI bounding box. Center palm and hold steady.",
+            stage="roi",
+            diagnostics={"bbox": (x1, y1, x2, y2), "patch_shape": roi_patch.shape if hasattr(roi_patch, 'shape') else None}
+        )
 
     roi_normalized = cv2.resize(roi_patch, (target_size, target_size),
                                 interpolation=cv2.INTER_CUBIC)

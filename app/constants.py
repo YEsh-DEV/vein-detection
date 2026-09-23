@@ -31,6 +31,23 @@ ROI_DIR = os.path.join(PROJECT_ROOT, "roi_clahe")
 DATASET_DIR = os.path.join(PROJECT_ROOT, "dataset")
 LOGS_DIR = os.path.join(PROJECT_ROOT, "logs")
 SCAN_DIAGNOSTICS_LOG = os.path.join(LOGS_DIR, "scan_diagnostics.jsonl")
+CAPTURE_DIAGNOSTICS_LOG = os.path.join(LOGS_DIR, "capture_diagnostics.jsonl")
+
+# ---------------------------------------------------------------------------
+# Canonical Structured Capture Failure Codes (Demo Hardening)
+# ---------------------------------------------------------------------------
+CODE_HAND_TOO_CLOSE = "HAND_TOO_CLOSE"
+CODE_HAND_TOO_FAR = "HAND_TOO_FAR"
+CODE_HAND_OUTSIDE_FRAME = "HAND_OUTSIDE_FRAME"
+CODE_MEDIAPIPE_NO_LANDMARKS = "MEDIAPIPE_NO_LANDMARKS"
+CODE_INVALID_LANDMARKS = "INVALID_LANDMARKS"
+CODE_VALLEY_EXTRACTION_FAILED = "VALLEY_EXTRACTION_FAILED"
+CODE_ROI_EXTRACTION_FAILED = "ROI_EXTRACTION_FAILED"
+CODE_QUALITY_LOW_CONTRAST = "QUALITY_LOW_CONTRAST"
+CODE_QUALITY_EXCESSIVE_PADDING = "QUALITY_EXCESSIVE_PADDING"
+CODE_MODEL_NOT_LOADED = "MODEL_NOT_LOADED"
+CODE_CAMERA_ERROR = "CAMERA_ERROR"
+CODE_UNKNOWN_PIPELINE_ERROR = "UNKNOWN_PIPELINE_ERROR"
 
 # Temporary Diagnostic & Debug Mode (Stage 4 Phase A4)
 # Disabled by default. When enabled, writes raw frames, landmark overlays, and ROIs to debug_frames/

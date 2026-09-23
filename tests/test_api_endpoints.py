@@ -44,6 +44,7 @@ class TestAPIEndpoints(unittest.TestCase):
                 "starlette/httpx TestClient is not installed. Install with 'pip install httpx' for API testing."
             )
         # Patch db_manager DB_PATH
+        cls._orig_db_path = db_manager.DB_PATH
         cls.temp_dir = tempfile.TemporaryDirectory()
         cls.test_db_path = os.path.join(cls.temp_dir.name, "test_api_vein.db")
         db_manager.DB_PATH = cls.test_db_path
@@ -56,10 +57,9 @@ class TestAPIEndpoints(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        db_manager.DB_PATH = cls._orig_db_path
         if hasattr(cls, "temp_dir") and cls.temp_dir:
             cls.temp_dir.cleanup()
-
-        cls.temp_dir.cleanup()
 
     def test_health_endpoint(self):
         """GET /health returns HTTP 200 with engine and health status."""
