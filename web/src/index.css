@@ -83,3 +83,24 @@
   background: #121212;
   border-radius: 4px;
 }
+
+/* ── FLOATING BADGE ANIMATION (Home Page Keyword Pills) ──
+   Gentle up-down float with a slight lateral sway and subtle rotation.
+   Each badge uses a different duration + delay via inline style to
+   produce an organic, non-synchronised floating cloud effect. */
+@keyframes floatBadge {
+  0%   { transform: translateY(0px)   translateX(0px)   rotate(-1.5deg); }
+  25%  { transform: translateY(-6px)  translateX(2px)   rotate( 0deg);   }
+  50%  { transform: translateY(-10px) translateX(0px)   rotate( 1.5deg); }
+  75%  { transform: translateY(-6px)  translateX(-2px)  rotate( 0deg);   }
+  100% { transform: translateY(0px)   translateX(0px)   rotate(-1.5deg); }
+}
+
+/* Fade-in animation for screens */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-fadeIn {
+  animation: fadeIn 0.25s ease-out forwards;
+}
