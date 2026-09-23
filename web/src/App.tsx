@@ -704,21 +704,21 @@ export default function App() {
               </div>
 
               {/* Interactive Bottom Feature Badges - FLOATING ANIMATION */}
-              <div className="w-full text-center z-10 pt-3 pb-1">
-                <div className="text-[10px] font-black uppercase tracking-[0.2em] text-[#888] mb-4">
+              <div className="w-full text-center z-10 pt-4 pb-2">
+                <div className="text-[10px] font-black uppercase tracking-[0.2em] text-[#888] mb-3">
                   POWERED BY SUB-DERMAL VASCULAR INTELLIGENCE
                 </div>
 
-                {/* Floating keyword pills — each floats at different speed + delay */}
-                <div className="relative h-20 w-full max-w-[500px] mx-auto overflow-visible">
+                {/* Floating keyword pills — widely scattered at big scale without overlapping */}
+                <div className="relative h-40 sm:h-44 w-full max-w-[650px] mx-auto select-none">
 
-                  {/* VEIN MAPPING — center-left, floats slow */}
+                  {/* VEIN MAPPING — top-left, floats slow */}
                   <span
-                    className="absolute px-3.5 py-2 bg-[#FFDE59] text-black border-[2.5px] border-black rounded-2xl font-display font-black text-[11px] shadow-[3px_3px_0px_#121212] select-none pointer-events-none"
+                    className="absolute px-4 py-2 bg-[#FFDE59] text-black border-[2.5px] border-black rounded-2xl font-display font-black text-xs shadow-[3px_3px_0px_#121212] select-none pointer-events-none"
                     style={{
                       animation: 'floatBadge 3.6s ease-in-out infinite',
                       left: '2%',
-                      top: '4px',
+                      top: '6px',
                     }}
                   >
                     🩸 VEIN MAPPING
@@ -726,38 +726,38 @@ export default function App() {
 
                   {/* NIR SENSOR — top-right, floats medium */}
                   <span
-                    className="absolute px-3.5 py-2 bg-[#38BDF8] text-black border-[2.5px] border-black rounded-2xl font-display font-black text-[11px] shadow-[3px_3px_0px_#121212] select-none pointer-events-none"
+                    className="absolute px-4 py-2 bg-[#38BDF8] text-black border-[2.5px] border-black rounded-2xl font-display font-black text-xs shadow-[3px_3px_0px_#121212] select-none pointer-events-none"
                     style={{
                       animation: 'floatBadge 4.2s ease-in-out infinite',
                       animationDelay: '0.9s',
                       right: '2%',
-                      top: '0px',
+                      top: '12px',
                     }}
                   >
                     📡 NIR SENSOR
                   </span>
 
-                  {/* ZERO CONTACT — center, floats fast */}
+                  {/* ZERO CONTACT — bottom-left, floats fast */}
                   <span
-                    className="absolute px-3.5 py-2 bg-[#CCFF00] text-black border-[2.5px] border-black rounded-2xl font-display font-black text-[11px] shadow-[3px_3px_0px_#121212] select-none pointer-events-none"
+                    className="absolute px-4 py-2 bg-[#CCFF00] text-black border-[2.5px] border-black rounded-2xl font-display font-black text-xs shadow-[3px_3px_0px_#121212] select-none pointer-events-none"
                     style={{
                       animation: 'floatBadge 5.0s ease-in-out infinite',
                       animationDelay: '1.7s',
-                      left: '29%',
-                      top: '28px',
+                      left: '10%',
+                      top: '88px',
                     }}
                   >
                     ✋ ZERO CONTACT
                   </span>
 
-                  {/* LIVE TISSUE — bottom-left, floats slowest */}
+                  {/* LIVE TISSUE — bottom-right, floats slowest */}
                   <span
-                    className="absolute px-3.5 py-2 bg-[#FF4081] text-white border-[2.5px] border-black rounded-2xl font-display font-black text-[11px] shadow-[3px_3px_0px_#121212] select-none pointer-events-none"
+                    className="absolute px-4 py-2 bg-[#FF4081] text-white border-[2.5px] border-black rounded-2xl font-display font-black text-xs shadow-[3px_3px_0px_#121212] select-none pointer-events-none"
                     style={{
                       animation: 'floatBadge 3.0s ease-in-out infinite',
                       animationDelay: '2.5s',
-                      left: '5%',
-                      top: '42px',
+                      right: '10%',
+                      top: '80px',
                     }}
                   >
                     💡 LIVE TISSUE
@@ -785,13 +785,13 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Dominant Camera Viewport — enlarged so user clearly sees their hand */}
-              <div className="bg-white border-[3px] border-black rounded-2xl p-1.5 shadow-[4px_4px_0px_#121212] relative overflow-hidden flex flex-col items-center shrink-0">
+              {/* Dominant Camera Viewport — enlarged to fill the kiosk screen */}
+              <div className="w-full relative flex flex-col items-center shrink-0">
                 <CameraViewport 
                   cameraState={cameraState}
                   cameraErrorDetail={cameraErrorDetail}
                   onRetry={loadStatus}
-                  className="w-full h-[460px] sm:h-[500px]"
+                  className="w-full h-[580px] sm:h-[640px]"
                 >
                   {/* Soft Minimal Guide - Fits Either Hand, Unobstructed Video */}
                   <SoftPalmGuide />
@@ -931,12 +931,12 @@ export default function App() {
               </div>
 
               {/* Camera Viewport — SAME LARGE SIZE AS SCAN SECTION */}
-              <div className="bg-white border-[3px] border-black rounded-2xl p-1.5 shadow-[4px_4px_0px_#121212] relative overflow-hidden flex flex-col items-center flex-shrink-0">
+              <div className="w-full relative flex flex-col items-center shrink-0">
                 <CameraViewport
                   cameraState={cameraState}
                   cameraErrorDetail={cameraErrorDetail}
                   onRetry={loadStatus}
-                  className="w-full h-[460px] sm:h-[500px]"
+                  className="w-full h-[580px] sm:h-[640px]"
                 >
                   {/* Soft Minimal Guide - Fits Either Hand */}
                   <SoftPalmGuide />
