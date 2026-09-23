@@ -22,6 +22,10 @@ try:
         DEFAULT_EXPOSURE_US, DEFAULT_ANALOGUE_GAIN,
         EXPOSURE_SEARCH_BOUNDS_US, GAIN_SEARCH_BOUNDS,
         EXPOSURE_SEARCH_STEPS_US, GAIN_SEARCH_STEPS,
+        CANDIDATE_EXPOSURE_SWEEPS,
+        NIR_EXTRACTION_METHOD,
+        DISPLAY_PERCENTILE_LOW, DISPLAY_PERCENTILE_HIGH,
+        DISPLAY_CLAHE_CLIP, DISPLAY_CLAHE_GRID,
         TARGET_PALM_MEAN_MIN, TARGET_PALM_MEAN_MAX,
         MIN_CONTRAST_STD, MAX_IR_SATURATION_PCT,
     )
@@ -30,15 +34,19 @@ except ImportError:
         DEFAULT_EXPOSURE_US, DEFAULT_ANALOGUE_GAIN,
         EXPOSURE_SEARCH_BOUNDS_US, GAIN_SEARCH_BOUNDS,
         EXPOSURE_SEARCH_STEPS_US, GAIN_SEARCH_STEPS,
+        CANDIDATE_EXPOSURE_SWEEPS,
+        NIR_EXTRACTION_METHOD,
+        DISPLAY_PERCENTILE_LOW, DISPLAY_PERCENTILE_HIGH,
+        DISPLAY_CLAHE_CLIP, DISPLAY_CLAHE_GRID,
         TARGET_PALM_MEAN_MIN, TARGET_PALM_MEAN_MAX,
         MIN_CONTRAST_STD, MAX_IR_SATURATION_PCT,
     )
 
 
 # ---------------------------------------------------------------------------
-# 1. Optimal NIR Channel Extraction
+# 1. Configurable NIR Channel Extraction
 # ---------------------------------------------------------------------------
-def extract_nir_channel(frame: np.ndarray) -> np.ndarray:
+def extract_nir_channel(frame: np.ndarray, method: Optional[str] = None) -> np.ndarray:
     """
     Extracts calibrated NIR grayscale representation from a camera frame.
 
@@ -51,6 +59,14 @@ def extract_nir_channel(frame: np.ndarray) -> np.ndarray:
       which gives 58.7% weight to the Green channel (the lowest NIR transmission site).
     - Calibrated NIR weighting (0.50*R + 0.25*G + 0.25*B) maximizes 850nm signal-to-noise ratio
       while integrating all physical photodiode sites without Bayer mosaic patterning.
+
+    Supported methods:
+      - 'weighted_nir': 0.50*R + 0.25*G + 0.25*B (default)
+      - 'r_channel': Pure Red channel
+      - 'g_channel': Pure Green channel
+      - 'b_channel': Pure Blue channel
+      - 'rec601_gray': Standard Rec.601 (0.299*R + 0.587*G + 0.114*B)
+      - 'equal_nir': Equal weighting ((R + G + B) / 3.0)
     """
     if frame is None:
         raise ValueError("Input frame is None")
@@ -58,9 +74,10 @@ def extract_nir_channel(frame: np.ndarray) -> np.ndarray:
     if frame.ndim == 2:
         return frame
 
+    mode = (method or NIR_EXTRACTION_METHOD).lower()
+
     # 4-channel image (e.g. XBGR8888 or BGRA from Picamera2/V4L2)
     if frame.shape[2] == 4:
-        # Channels 0, 1, 2 are B, G, R
         b = frame[:, :, 0].astype(np.float32)
         g = frame[:, :, 1].astype(np.float32)
         r = frame[:, :, 2].astype(np.float32)
@@ -74,48 +91,67 @@ def extract_nir_channel(frame: np.ndarray) -> np.ndarray:
     else:
         raise ValueError(f"Unsupported frame channels: {frame.shape[2]}")
 
-    # Calibrated NIR luminance: emphasizes the high-transmission Red channel
-    nir_gray = (0.50 * r + 0.25 * g + 0.25 * b).clip(0, 255).astype(np.uint8)
-    return nir_gray
+    if mode == "r_channel":
+        return r.clip(0, 255).astype(np.uint8)
+    elif mode == "g_channel":
+        return g.clip(0, 255).astype(np.uint8)
+    elif mode == "b_channel":
+        return b.clip(0, 255).astype(np.uint8)
+    elif mode in ("rec601_gray", "grayscale"):
+        return (0.299 * r + 0.587 * g + 0.114 * b).clip(0, 255).astype(np.uint8)
+    elif mode in ("equal_nir", "equal_weighted"):
+        return ((r + g + b) / 3.0).clip(0, 255).astype(np.uint8)
+    else:
+        # Default: weighted_nir (0.50*R + 0.25*G + 0.25*B)
+        return (0.50 * r + 0.25 * g + 0.25 * b).clip(0, 255).astype(np.uint8)
 
 
 # ---------------------------------------------------------------------------
 # 2. Display-Only Enhancement Pipeline (Human-Readable UI)
 # ---------------------------------------------------------------------------
-def create_display_frame(raw_frame: np.ndarray) -> np.ndarray:
+def create_display_frame(raw_frame: np.ndarray, method: Optional[str] = None) -> np.ndarray:
     """
-    Transforms raw camera frame into a clean, contrast-stretched monochrome visualization
-    for live browser preview (/api/video_feed).
+    Transforms raw camera frame into a balanced, percentile-normalized monochrome visualization
+    for live browser preview (/api/video_feed) and operator inspection.
 
-    CRITICAL BOUNDARY:
+    CRITICAL ARCHITECTURAL BOUNDARY:
     This function is strictly for OPERATOR DISPLAY ONLY.
-    Its output is NEVER fed into AMPVNet or feature extraction.
+    Its output is NEVER fed into MediaPipe, MA2017 ROI extraction, or AMPVNet.
 
-    Transformations applied:
-    1. Optimal NIR monochrome conversion (removes purple/pink cast completely).
-    2. Dynamic range normalization (stretches contrast to visible range [0, 255]).
-    3. Mild CLAHE (clipLimit=2.0, tileGridSize=(8, 8)) to reveal palm crease details.
-    4. 3-channel BGR encoding for JPEG streaming.
+    Transformations applied (Problem 1 & Problem 5):
+    1. Obtain the best available NIR representation via extract_nir_channel().
+    2. Percentile-clipped normalization:
+       - low percentile ≈ P2
+       - high percentile ≈ P96
+    3. Clip intensity values before mapping to 0-255 (avoids full min/max stretching that pushes palm to pure white).
+    4. Gentle CLAHE:
+       - clipLimit ≈ 1.2
+       - tileGridSize = (8, 8)
+       - avoids aggressive local contrast amplification, avoiding harsh skin creases.
+    5. Convert to 3-channel BGR for browser JPEG streaming compatibility.
     """
     if raw_frame is None:
         return None
 
-    # Step 1: NIR monochrome conversion
-    nir_gray = extract_nir_channel(raw_frame)
+    # Step 1: Best available NIR representation
+    nir_gray = extract_nir_channel(raw_frame, method=method)
 
-    # Step 2: Mild contrast stretch / dynamic range normalization
-    # Protect against flat all-black or all-white frames
-    min_val, max_val = int(nir_gray.min()), int(nir_gray.max())
-    if max_val > min_val + 10:
-        stretched = cv2.normalize(nir_gray, None, 0, 255, cv2.NORM_MINMAX)
+    # Step 2 & 3: Percentile-clipped normalization (P2 - P96)
+    p_low = float(np.percentile(nir_gray, DISPLAY_PERCENTILE_LOW))
+    p_high = float(np.percentile(nir_gray, DISPLAY_PERCENTILE_HIGH))
+
+    # Protect against flat or degenerate frames
+    if p_high > p_low + 5.0:
+        clipped = np.clip(nir_gray.astype(np.float32), p_low, p_high)
+        normalized = ((clipped - p_low) / (p_high - p_low) * 255.0).astype(np.uint8)
     else:
-        stretched = nir_gray
+        normalized = nir_gray
 
-    # Step 3: Mild CLAHE for human operator visualization
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    disp_enhanced = clahe.apply(stretched)
+    # Step 4: Gentle CLAHE for natural, informative NIR visualization (clipLimit=1.2, grid=(8, 8))
+    clahe = cv2.createCLAHE(clipLimit=DISPLAY_CLAHE_CLIP, tileGridSize=DISPLAY_CLAHE_GRID)
+    disp_enhanced = clahe.apply(normalized)
 
-    # Step 4: Convert to 3-channel BGR for browser JPEG stream compatibility
+    # Step 5: Convert to 3-channel BGR for browser JPEG stream compatibility
     return cv2.cvtColor(disp_enhanced, cv2.COLOR_GRAY2BGR)
 
 
@@ -283,7 +319,173 @@ def calculate_calibrated_exposure_and_gain(
 
 
 # ---------------------------------------------------------------------------
-# 6. Operator Camera Debug Output (Task 9)
+# 6. Empirical NIR Representation Comparison (Problem 3)
+# ---------------------------------------------------------------------------
+def compute_palm_region_mask(gray: np.ndarray) -> np.ndarray:
+    """
+    Computes a binary mask isolating the palm/hand region from background
+    using Otsu thresholding with morphological closing.
+    Guarantees a valid, non-empty mask.
+    """
+    if gray is None:
+        raise ValueError("Input gray image is None")
+    blur = cv2.GaussianBlur(gray, (7, 7), 0)
+    _, mask = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # Morphological closing to seal internal vascular pits and valleys
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+    closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    if cv2.countNonZero(closed) < 100:
+        return np.full_like(gray, 255)
+    return closed
+
+
+def compute_channel_metrics(
+    img_gray: np.ndarray,
+    mask: Optional[np.ndarray] = None
+) -> Dict[str, Any]:
+    """
+    Computes empirical statistical and structural quality metrics on an image,
+    strictly restricted to the palm region when a mask is provided.
+
+    Metrics calculated (Problem 3):
+    - mean
+    - standard deviation (contrast std)
+    - P1, P5, P50, P95, P99
+    - dynamic range (P99 - P1)
+    - local contrast (mean of local block std deviations in 16x16 windows)
+    - Laplacian sharpness (Laplacian variance)
+    - Sobel edge variance (Sobel gradient magnitude variance)
+    """
+    if img_gray is None:
+        raise ValueError("Input image is None")
+
+    if mask is not None and cv2.countNonZero(mask) > 50:
+        palm_pixels = img_gray[mask > 0].astype(np.float32)
+    else:
+        palm_pixels = img_gray.astype(np.float32).ravel()
+
+    mean_val = float(np.mean(palm_pixels))
+    std_val = float(np.std(palm_pixels))
+    p1, p5, p50, p95, p99 = [float(x) for x in np.percentile(palm_pixels, [1, 5, 50, 95, 99])]
+    dyn_range = float(p99 - p1)
+
+    # Sharpness via Laplacian variance
+    lap = cv2.Laplacian(img_gray, cv2.CV_64F)
+    if mask is not None and cv2.countNonZero(mask) > 50:
+        sharpness = float(np.var(lap[mask > 0]))
+    else:
+        sharpness = float(lap.var())
+
+    # Sobel edge variance
+    sobel_x = cv2.Sobel(img_gray, cv2.CV_64F, 1, 0, ksize=3)
+    sobel_y = cv2.Sobel(img_gray, cv2.CV_64F, 0, 1, ksize=3)
+    sobel_mag = np.sqrt(sobel_x**2 + sobel_y**2)
+    if mask is not None and cv2.countNonZero(mask) > 50:
+        sobel_var = float(np.var(sobel_mag[mask > 0]))
+    else:
+        sobel_var = float(np.var(sobel_mag))
+
+    # Local contrast: average standard deviation across 16x16 sliding windows
+    # inside the palm region (captures subtle sub-dermal vascular contrast)
+    h, w = img_gray.shape
+    block_stds = []
+    bs = 16
+    for y in range(0, h - bs + 1, bs):
+        for x in range(0, w - bs + 1, bs):
+            if mask is not None:
+                m_blk = mask[y:y+bs, x:x+bs]
+                if cv2.countNonZero(m_blk) < (bs * bs * 0.70):
+                    continue
+            blk = img_gray[y:y+bs, x:x+bs]
+            block_stds.append(float(np.std(blk)))
+
+    local_contrast = float(np.mean(block_stds)) if block_stds else std_val
+
+    return {
+        "mean": round(mean_val, 2),
+        "std": round(std_val, 2),
+        "p1": round(p1, 2),
+        "p5": round(p5, 2),
+        "p50": round(p50, 2),
+        "p95": round(p95, 2),
+        "p99": round(p99, 2),
+        "dynamic_range": round(dyn_range, 2),
+        "local_contrast": round(local_contrast, 2),
+        "sharpness": round(sharpness, 2),
+        "sobel_variance": round(sobel_var, 2),
+    }
+
+
+def compare_nir_representations(
+    frame: np.ndarray,
+    palm_mask: Optional[np.ndarray] = None,
+    output_dir: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Empirically generates and compares candidate NIR representations:
+    1. channel_R (Red channel alone)
+    2. channel_G (Green channel alone)
+    3. channel_B (Blue channel alone)
+    4. grayscale (standard Rec.601)
+    5. nir_weighted (0.50R + 0.25G + 0.25B)
+    6. equal_weighted ((R + G + B) / 3.0)
+
+    Computes detailed statistics INSIDE THE PALM REGION, and optionally saves:
+      debug_frames/channel_R.png
+      debug_frames/channel_G.png
+      debug_frames/channel_B.png
+      debug_frames/grayscale.png
+      debug_frames/nir_weighted.png
+      debug_frames/comparison.json
+    """
+    import os
+    import json
+    try:
+        from app.constants import DEBUG_FRAMES_DIR
+    except ImportError:
+        from constants import DEBUG_FRAMES_DIR
+
+    if frame is None:
+        raise ValueError("Input frame is None")
+
+    # Generate candidate grayscale representations
+    representations = {
+        "channel_R": extract_nir_channel(frame, method="r_channel"),
+        "channel_G": extract_nir_channel(frame, method="g_channel"),
+        "channel_B": extract_nir_channel(frame, method="b_channel"),
+        "grayscale": extract_nir_channel(frame, method="rec601_gray"),
+        "nir_weighted": extract_nir_channel(frame, method="weighted_nir"),
+        "equal_weighted": extract_nir_channel(frame, method="equal_nir"),
+    }
+
+    # Obtain palm mask if not provided
+    base_gray = representations["nir_weighted"]
+    mask = palm_mask if palm_mask is not None else compute_palm_region_mask(base_gray)
+
+    results: Dict[str, Any] = {}
+    for name, img in representations.items():
+        results[name] = compute_channel_metrics(img, mask=mask)
+
+    target_dir = output_dir or DEBUG_FRAMES_DIR
+    if target_dir:
+        os.makedirs(target_dir, exist_ok=True)
+        # Save images
+        cv2.imwrite(os.path.join(target_dir, "channel_R.png"), representations["channel_R"])
+        cv2.imwrite(os.path.join(target_dir, "channel_G.png"), representations["channel_G"])
+        cv2.imwrite(os.path.join(target_dir, "channel_B.png"), representations["channel_B"])
+        cv2.imwrite(os.path.join(target_dir, "grayscale.png"), representations["grayscale"])
+        cv2.imwrite(os.path.join(target_dir, "nir_weighted.png"), representations["nir_weighted"])
+        cv2.imwrite(os.path.join(target_dir, "equal_weighted.png"), representations["equal_weighted"])
+
+        comp_json_path = os.path.join(target_dir, "comparison.json")
+        with open(comp_json_path, "w", encoding="utf-8") as f:
+            json.dump(results, f, indent=2)
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# 7. Operator Camera Debug Output (Problem 7)
 # ---------------------------------------------------------------------------
 def save_operator_debug_dump(
     raw_frame: np.ndarray,
@@ -295,22 +497,28 @@ def save_operator_debug_dump(
     output_dir: Optional[str] = None,
 ) -> Dict[str, str]:
     """
-    Saves internal operator debug frames and structured diagnostics JSON (Task 9).
+    Saves internal operator debug frames and structured diagnostics JSON (Problem 7).
 
     Produces:
       01_raw.png
-      02_processed_gray.png
+      02_nir.png (and 02_processed_gray.png for backward-compatibility)
       03_landmarks.png
       04_roi_raw.png
       05_roi_enhanced.png
       diagnostics.json
+      diagnostics.txt
+
+    Guarantees exact diagnostics.json keys:
+      exposure, gain, resolution, selected channel/representation,
+      brightness, contrast, saturation, sharpness, landmark count,
+      Pv1/Pv2, ROI bbox, ROI padding, ROI contrast, ROI sharpness.
     """
     import os
     import json
     try:
-        from app.constants import DEBUG_FRAMES_DIR
+        from app.constants import DEBUG_FRAMES_DIR, NIR_EXTRACTION_METHOD, DEFAULT_EXPOSURE_US, DEFAULT_ANALOGUE_GAIN
     except ImportError:
-        from constants import DEBUG_FRAMES_DIR
+        from constants import DEBUG_FRAMES_DIR, NIR_EXTRACTION_METHOD, DEFAULT_EXPOSURE_US, DEFAULT_ANALOGUE_GAIN
 
     target_dir = output_dir or DEBUG_FRAMES_DIR
     os.makedirs(target_dir, exist_ok=True)
@@ -323,11 +531,14 @@ def save_operator_debug_dump(
         cv2.imwrite(p01, raw_frame)
         saved_paths["01_raw"] = p01
 
-    # 02_processed_gray.png
+    # 02_nir.png (primary) & 02_processed_gray.png (alias)
     if processed_gray is not None:
-        p02 = os.path.join(target_dir, "02_processed_gray.png")
+        p02 = os.path.join(target_dir, "02_nir.png")
+        p02_alias = os.path.join(target_dir, "02_processed_gray.png")
         cv2.imwrite(p02, processed_gray)
-        saved_paths["02_processed_gray"] = p02
+        cv2.imwrite(p02_alias, processed_gray)
+        saved_paths["02_nir"] = p02
+        saved_paths["02_processed_gray"] = p02_alias
 
     # 03_landmarks.png
     if landmarks_overlay is not None:
@@ -347,17 +558,85 @@ def save_operator_debug_dump(
         cv2.imwrite(p05, roi_enhanced)
         saved_paths["05_roi_enhanced"] = p05
 
-    # diagnostics.json & diagnostics.txt
+    # Normalize diagnostics dictionary with exact Problem 7 fields
+    diag_norm: Dict[str, Any] = dict(diagnostics)
+
+    # Resolution
+    res = diag_norm.get("resolution")
+    if not res:
+        if raw_frame is not None and hasattr(raw_frame, "shape"):
+            res = f"{raw_frame.shape[1]}x{raw_frame.shape[0]}"
+        elif processed_gray is not None and hasattr(processed_gray, "shape"):
+            res = f"{processed_gray.shape[1]}x{processed_gray.shape[0]}"
+        else:
+            res = "640x480"
+    diag_norm["resolution"] = res
+
+    # Exposure & Gain
+    exp = diag_norm.get("exposure", diag_norm.get("exposure_us", DEFAULT_EXPOSURE_US))
+    gn = diag_norm.get("gain", diag_norm.get("analogue_gain", DEFAULT_ANALOGUE_GAIN))
+    diag_norm["exposure"] = exp
+    diag_norm["exposure_us"] = exp
+    diag_norm["gain"] = gn
+    diag_norm["analogue_gain"] = gn
+
+    # Selected representation
+    rep = diag_norm.get("selected channel/representation", diag_norm.get("selected_representation", NIR_EXTRACTION_METHOD))
+    diag_norm["selected channel/representation"] = rep
+    diag_norm["selected_representation"] = rep
+
+    # Brightness, Contrast, Saturation, Sharpness
+    b_val = diag_norm.get("brightness", diag_norm.get("mean", float(np.mean(processed_gray)) if processed_gray is not None else 0.0))
+    c_val = diag_norm.get("contrast", diag_norm.get("contrast_std", float(np.std(processed_gray)) if processed_gray is not None else 0.0))
+    s_val = diag_norm.get("saturation", diag_norm.get("saturation_pct", 0.0))
+    sh_val = diag_norm.get("sharpness", float(cv2.Laplacian(processed_gray, cv2.CV_64F).var()) if processed_gray is not None else 0.0)
+
+    diag_norm["brightness"] = round(float(b_val), 2)
+    diag_norm["mean"] = round(float(b_val), 2)
+    diag_norm["contrast"] = round(float(c_val), 2)
+    diag_norm["contrast_std"] = round(float(c_val), 2)
+    diag_norm["saturation"] = round(float(s_val), 2)
+    diag_norm["saturation_pct"] = round(float(s_val), 2)
+    diag_norm["sharpness"] = round(float(sh_val), 2)
+
+    # Landmark count and Pv1/Pv2
+    lm_count = diag_norm.get("landmark count", diag_norm.get("landmark_count", 21))
+    diag_norm["landmark count"] = lm_count
+    diag_norm["landmark_count"] = lm_count
+
+    pv = diag_norm.get("Pv1/Pv2", diag_norm.get("pv1_pv2", None))
+    diag_norm["Pv1/Pv2"] = pv
+    diag_norm["pv1_pv2"] = pv
+
+    # ROI metrics
+    bbox = diag_norm.get("ROI bbox", diag_norm.get("roi_bbox", None))
+    pad = diag_norm.get("ROI padding", diag_norm.get("roi_padding", diag_norm.get("roi_padding_pct", 0.0)))
+    r_cont = diag_norm.get("ROI contrast", diag_norm.get("roi_contrast", diag_norm.get("roi_contrast_std", 0.0)))
+    r_sharp = diag_norm.get("ROI sharpness", diag_norm.get("roi_sharpness", float(cv2.Laplacian(roi_raw, cv2.CV_64F).var()) if roi_raw is not None else 0.0))
+
+    diag_norm["ROI bbox"] = bbox
+    diag_norm["roi_bbox"] = bbox
+    diag_norm["ROI padding"] = pad
+    diag_norm["roi_padding"] = pad
+    diag_norm["roi_padding_pct"] = pad
+    diag_norm["ROI contrast"] = r_cont
+    diag_norm["roi_contrast"] = r_cont
+    diag_norm["roi_contrast_std"] = r_cont
+    diag_norm["ROI sharpness"] = round(float(r_sharp), 2)
+    diag_norm["roi_sharpness"] = round(float(r_sharp), 2)
+
+    # Write diagnostics.json
     p_json = os.path.join(target_dir, "diagnostics.json")
     with open(p_json, "w", encoding="utf-8") as f:
-        json.dump(diagnostics, f, indent=2)
+        json.dump(diag_norm, f, indent=2)
     saved_paths["diagnostics_json"] = p_json
 
+    # Write human-readable diagnostics.txt
     p_txt = os.path.join(target_dir, "diagnostics.txt")
     with open(p_txt, "w", encoding="utf-8") as f:
         f.write("=== OPERATOR CAMERA CAPTURE DIAGNOSTICS ===\n")
-        for k, v in diagnostics.items():
-            f.write(f"{k:<24}: {v}\n")
+        for k, v in diag_norm.items():
+            f.write(f"{k:<32}: {v}\n")
     saved_paths["diagnostics_txt"] = p_txt
 
     return saved_paths

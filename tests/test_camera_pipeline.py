@@ -151,6 +151,13 @@ class TestCameraPipeline(unittest.TestCase):
         self.assertEqual(purple_frame[0, 0, 1], 120)
         self.assertEqual(purple_frame[0, 0, 2], 190)
 
+        # Problem 1 verification:
+        # Balanced mid-gray palm: Ensure output is NOT blown out to pure white (255)
+        # across the entire palm region.
+        palm_patch = np.full((100, 100, 3), 160, dtype=np.uint8)
+        disp_palm = create_display_frame(palm_patch)
+        self.assertLess(float(disp_palm.mean()), 254.0, "Display frame must not blow palm out to pure white")
+
     def test_04_best_frame_selection_prefers_sharp_contrasted_frame(self):
         """
         Validates that select_best_frame chooses the candidate with superior contrast
@@ -200,8 +207,11 @@ class TestCameraPipeline(unittest.TestCase):
 
     def test_05_operator_debug_dump_saves_all_required_artifacts(self):
         """
-        Validates Task 9: saving 01_raw.png, 02_processed_gray.png, 03_landmarks.png,
-        04_roi_raw.png, 05_roi_enhanced.png, and diagnostics.json with all required fields.
+        Validates Problem 7: saving 01_raw.png, 02_nir.png, 03_landmarks.png,
+        04_roi_raw.png, 05_roi_enhanced.png, and diagnostics.json with all required fields:
+          exposure, gain, resolution, selected channel/representation, brightness,
+          contrast, saturation, sharpness, landmark count, Pv1/Pv2, ROI bbox,
+          ROI padding, ROI contrast, ROI sharpness.
         """
         raw = np.full((100, 100, 3), 100, dtype=np.uint8)
         gray = np.full((100, 100), 100, dtype=np.uint8)
@@ -218,9 +228,12 @@ class TestCameraPipeline(unittest.TestCase):
             "dynamic_range": [25, 230],
             "saturation_pct": 0.4,
             "sharpness": 55.2,
+            "landmark_count": 21,
+            "pv1_pv2": [[100, 200], [150, 210]],
             "roi_bbox": [100, 120, 224, 224],
             "roi_padding_pct": 0.05,
             "roi_contrast_std": 28.1,
+            "roi_sharpness": 45.0,
             "selected_frame_score": 64.5,
         }
 
@@ -234,8 +247,9 @@ class TestCameraPipeline(unittest.TestCase):
             output_dir=self.temp_dir,
         )
 
-        # Check that all 5 image files exist
+        # Check that both 02_nir.png and 02_processed_gray.png exist
         self.assertTrue(os.path.isfile(os.path.join(self.temp_dir, "01_raw.png")))
+        self.assertTrue(os.path.isfile(os.path.join(self.temp_dir, "02_nir.png")), "02_nir.png must exist")
         self.assertTrue(os.path.isfile(os.path.join(self.temp_dir, "02_processed_gray.png")))
         self.assertTrue(os.path.isfile(os.path.join(self.temp_dir, "03_landmarks.png")))
         self.assertTrue(os.path.isfile(os.path.join(self.temp_dir, "04_roi_raw.png")))
@@ -247,12 +261,82 @@ class TestCameraPipeline(unittest.TestCase):
         with open(json_path, "r", encoding="utf-8") as f:
             loaded_json = json.load(f)
 
+        # Check exact Problem 7 fields
         for required_key in [
-            "resolution", "exposure_us", "analogue_gain", "mean", "contrast_std",
-            "dynamic_range", "saturation_pct", "sharpness", "roi_bbox",
-            "roi_padding_pct", "roi_contrast_std", "selected_frame_score"
+            "exposure", "gain", "resolution", "selected channel/representation",
+            "brightness", "contrast", "saturation", "sharpness", "landmark count",
+            "Pv1/Pv2", "ROI bbox", "ROI padding", "ROI contrast", "ROI sharpness"
         ]:
-            self.assertIn(required_key, loaded_json, f"Missing required diagnostic field: {required_key}")
+            self.assertIn(required_key, loaded_json, f"Missing required Problem 7 diagnostic field: {required_key}")
+
+    def test_06_configurable_nir_channels_and_empirical_comparison(self):
+        """
+        Validates Problem 3: empirical comparison of NIR representations (R, G, B, Rec.601,
+        NIR weighted, Equal weighted) inside the palm region.
+        """
+        from app.camera_pipeline import compare_nir_representations
+
+        test_frame = np.zeros((100, 100, 3), dtype=np.uint8)
+        test_frame[:, :, 0] = 50   # Blue
+        test_frame[:, :, 1] = 80   # Green
+        test_frame[:, :, 2] = 160  # Red
+
+        # Test configurable extraction modes
+        r_out = extract_nir_channel(test_frame, method="r_channel")
+        self.assertEqual(int(r_out.mean()), 160)
+        g_out = extract_nir_channel(test_frame, method="g_channel")
+        self.assertEqual(int(g_out.mean()), 80)
+        b_out = extract_nir_channel(test_frame, method="b_channel")
+        self.assertEqual(int(b_out.mean()), 50)
+        eq_out = extract_nir_channel(test_frame, method="equal_nir")
+        self.assertEqual(int(eq_out.mean()), (160 + 80 + 50) // 3)
+
+        # Test empirical comparison execution
+        comp = compare_nir_representations(test_frame, output_dir=self.temp_dir)
+        self.assertIn("channel_R", comp)
+        self.assertIn("channel_G", comp)
+        self.assertIn("channel_B", comp)
+        self.assertIn("grayscale", comp)
+        self.assertIn("nir_weighted", comp)
+        self.assertIn("equal_weighted", comp)
+
+        # Verify all Problem 3 required statistics exist for each channel
+        for ch_name, stats in comp.items():
+            for stat_key in ["mean", "std", "p1", "p5", "p50", "p95", "p99", "dynamic_range", "local_contrast", "sharpness", "sobel_variance"]:
+                self.assertIn(stat_key, stats, f"Stat '{stat_key}' missing from '{ch_name}'")
+
+        # Verify output files
+        self.assertTrue(os.path.isfile(os.path.join(self.temp_dir, "channel_R.png")))
+        self.assertTrue(os.path.isfile(os.path.join(self.temp_dir, "channel_G.png")))
+        self.assertTrue(os.path.isfile(os.path.join(self.temp_dir, "channel_B.png")))
+        self.assertTrue(os.path.isfile(os.path.join(self.temp_dir, "grayscale.png")))
+        self.assertTrue(os.path.isfile(os.path.join(self.temp_dir, "nir_weighted.png")))
+        self.assertTrue(os.path.isfile(os.path.join(self.temp_dir, "comparison.json")))
+
+    def test_07_candidate_exposure_sweep(self):
+        """
+        Validates Problem 4: bounded candidate exposure and analogue gain sweep.
+        """
+        import argparse
+        from tools.sweep_camera_exposure import run_exposure_sweep
+
+        args = argparse.Namespace(synthetic=True, image="", output_dir=self.temp_dir)
+        exit_code = run_exposure_sweep(args)
+        self.assertEqual(exit_code, 0)
+
+        # Verify sweep output JSON
+        sweep_json_path = os.path.join(self.temp_dir, "exposure_sweep_results.json")
+        self.assertTrue(os.path.isfile(sweep_json_path))
+        with open(sweep_json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        self.assertIn("candidates_tested", data)
+        self.assertEqual(len(data["candidates_tested"]), 5)
+        for cand in data["candidates_tested"]:
+            self.assertIn("exposure_us", cand)
+            self.assertIn("analogue_gain", cand)
+            self.assertIn("palm_contrast_std", cand)
+            self.assertIn("saturation_pct", cand)
 
 
 if __name__ == "__main__":

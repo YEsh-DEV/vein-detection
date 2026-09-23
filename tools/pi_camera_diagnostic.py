@@ -52,9 +52,20 @@ try:
         extract_ma2017_scaled_roi,
         compute_roi_quality,
         enhance_roi_vessels,
+        draw_landmarks_overlay,
     )
-    from app.constants import MODEL_PATH, EXPERIMENTAL_MATCH_THRESHOLD, DEFAULT_EXPOSURE_US, DEFAULT_ANALOGUE_GAIN
-    from app.camera_pipeline import extract_nir_channel, create_display_frame
+    from app.constants import (
+        MODEL_PATH, EXPERIMENTAL_MATCH_THRESHOLD,
+        DEFAULT_EXPOSURE_US, DEFAULT_ANALOGUE_GAIN,
+        CANDIDATE_EXPOSURE_SWEEPS, NIR_EXTRACTION_METHOD,
+        DEBUG_FRAMES_DIR,
+    )
+    from app.camera_pipeline import (
+        extract_nir_channel,
+        create_display_frame,
+        compare_nir_representations,
+        save_operator_debug_dump,
+    )
 except ImportError as e:
     print(f"[!] Warning: App import failed: {e}")
     sys.exit(1)
@@ -457,6 +468,56 @@ def run_diagnostics(args):
                 "        * Instruct users to keep fingers within the outer framing guides."
             )
 
+    # Inspect and save ROI debug artifacts if requested (Problem 7)
+    if args.inspect_roi and roi_224 is not None:
+        try:
+            overlay = draw_landmarks_overlay(gray, landmarks, v1, v2) if ('landmarks' in locals() and 'v1' in locals() and 'v2' in locals()) else None
+            roi_enh = enhance_roi_vessels(roi_224) if roi_224 is not None else None
+            dump_dir = args.output_dir or DEBUG_FRAMES_DIR
+            dump_res = save_operator_debug_dump(
+                raw_frame=frame_bgr,
+                processed_gray=gray,
+                landmarks_overlay=overlay,
+                roi_raw=roi_224,
+                roi_enhanced=roi_enh,
+                diagnostics={
+                    "resolution": f"{gray.shape[1]}x{gray.shape[0]}",
+                    "exposure": capture_meta.get("exposure_us", DEFAULT_EXPOSURE_US),
+                    "gain": capture_meta.get("gain", DEFAULT_ANALOGUE_GAIN),
+                    "selected_representation": NIR_EXTRACTION_METHOD,
+                    "brightness": stats["mean"],
+                    "contrast": stats["std"],
+                    "saturation": stats["sat_pct"],
+                    "sharpness": stats["sharpness"],
+                    "landmark_count": len(landmarks) if 'landmarks' in locals() else 0,
+                    "pv1_pv2": [list(v1), list(v2)] if ('v1' in locals() and 'v2' in locals()) else None,
+                    "roi_bbox": [int(x) for x in bbox] if ('bbox' in locals() and bbox is not None) else None,
+                    "roi_padding": quality.get("pad_pct", 0.0) if 'quality' in locals() else 0.0,
+                    "roi_contrast": quality.get("contrast_std", 0.0) if 'quality' in locals() else 0.0,
+                    "roi_sharpness": round(float(cv2.Laplacian(roi_224, cv2.CV_64F).var()), 2) if roi_224 is not None else 0.0,
+                },
+                output_dir=dump_dir,
+            )
+            print_status("Operator Debug Dump", "PASS", f"Saved to {dump_dir} (01_raw, 02_nir, 03_landmarks, 04_roi_raw, 05_roi_enhanced, diagnostics.json)")
+        except Exception as e:
+            print_status("Operator Debug Dump", "WARN", f"Failed to save debug dump: {e}")
+
+    # Empirical channel comparison if requested (Problem 3)
+    if args.compare_channels:
+        print_header("EMPIRICAL NIR REPRESENTATION COMPARISON (Problem 3)")
+        from tools.compare_nir_channels import print_comparison_table
+        comp_dir = args.output_dir or DEBUG_FRAMES_DIR
+        comp_res = compare_nir_representations(frame_bgr, output_dir=comp_dir)
+        print_comparison_table(comp_res)
+        print(f"[+] Saved channel breakdown images and comparison.json to {comp_dir}")
+
+    # Bounded exposure & gain sweep if requested (Problem 4)
+    if args.sweep_exposure:
+        print_header("BOUNDED EXPOSURE & GAIN HARDWARE SWEEP (Problem 4)")
+        from tools.sweep_camera_exposure import run_exposure_sweep
+        sweep_args = argparse.Namespace(synthetic=args.synthetic, image="", output_dir=args.output_dir or DEBUG_FRAMES_DIR)
+        run_exposure_sweep(sweep_args)
+
     # Optional frame save
     if args.save_frame and frame_bgr is not None:
         save_path = Path(args.save_frame)
@@ -491,6 +552,14 @@ if __name__ == "__main__":
                         help=f"Analogue gain (default: {DEFAULT_ANALOGUE_GAIN})")
     parser.add_argument("--save-frame", type=str, default="",
                         help="Path to save captured diagnostic frame")
+    parser.add_argument("--inspect-roi", action="store_true",
+                        help="Save full debug artifacts (01_raw, 02_nir, 03_landmarks, 04_roi_raw, 05_roi_enhanced, diagnostics.json)")
+    parser.add_argument("--compare-channels", action="store_true",
+                        help="Run empirical comparison of NIR representations (R, G, B, Rec.601, NIR weighted, Equal weighted)")
+    parser.add_argument("--sweep-exposure", action="store_true",
+                        help="Run bounded candidate exposure and analogue gain sweep")
+    parser.add_argument("--output-dir", type=str, default="",
+                        help="Custom directory to store diagnostic outputs (default: debug_frames/)")
     args = parser.parse_args()
 
     exit_code = run_diagnostics(args)

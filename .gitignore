@@ -19,6 +19,7 @@ env/
 data/
 captures/
 roi_clahe/
+debug_frames/
 dataset/
 database/
 sample dataset/
