@@ -67,6 +67,8 @@ try:
         save_operator_debug_dump,
     )
 except ImportError as e:
+    DEFAULT_EXPOSURE_US = 14000
+    DEFAULT_ANALOGUE_GAIN = 1.5
     print(f"[!] Warning: App import failed: {e}")
     sys.exit(1)
 

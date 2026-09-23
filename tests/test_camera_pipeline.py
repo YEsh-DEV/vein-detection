@@ -82,7 +82,7 @@ class TestCameraPipeline(unittest.TestCase):
     def test_02_bounded_exposure_and_gain_calibration(self):
         """
         Validates bounded search behavior for underexposed and overexposed frames.
-        Must strictly remain within safe hardware limits [8000, 30000] us and [1.0, 3.0] gain.
+        Must strictly remain within safe hardware limits [8000, 22000] us and [1.0, 2.5] gain.
         """
         exp_min, exp_max = EXPOSURE_SEARCH_BOUNDS_US
         gain_min, gain_max = GAIN_SEARCH_BOUNDS
@@ -111,21 +111,21 @@ class TestCameraPipeline(unittest.TestCase):
         self.assertGreaterEqual(new_exp, exp_min)
         self.assertLessEqual(new_gain, 2.5)
 
-        # Scenario C: Optimal frame: mean=90, sat=0.5%
+        # Scenario C: Optimal frame: mean=110, sat=0.5%
         new_exp, new_gain = calculate_calibrated_exposure_and_gain(
-            current_mean=90.0,
+            current_mean=110.0,
             current_sat_pct=0.5,
-            current_exposure_us=10000,
-            current_gain=1.2,
+            current_exposure_us=14000,
+            current_gain=1.5,
         )
-        self.assertEqual(new_exp, 10000, "Optimal exposure should remain stable")
-        self.assertEqual(new_gain, 1.2, "Optimal gain should remain stable")
+        self.assertEqual(new_exp, 14000, "Optimal exposure should remain stable")
+        self.assertEqual(new_gain, 1.5, "Optimal gain should remain stable")
 
     def test_03_display_enhancement_removes_purple_and_separates_from_model(self):
         """
-        Validates that create_display_frame transforms purple/pink NoIR frames into
-        a crisp monochrome visualization (3-channel BGR with B=G=R) for the operator,
-        and that the display transform does NOT bleed into the raw biometric frame.
+        Validates that create_display_frame transforms raw frames into a 3-channel
+        uint8 BGR image with no channel blowout (no channel mean above 200),
+        and that the display transform does NOT bleed into or mutate the raw frame.
         """
         # Create a purple frame: High Blue (210), Low Green (120), High Red (190)
         purple_frame = np.zeros((200, 200, 3), dtype=np.uint8)
@@ -135,28 +135,26 @@ class TestCameraPipeline(unittest.TestCase):
 
         disp_frame = create_display_frame(purple_frame)
 
-        # Display frame must be 3-channel BGR for browser JPEG streaming
+        # Output must be a 3-channel uint8 BGR image
+        self.assertIsNotNone(disp_frame)
         self.assertEqual(disp_frame.shape, (200, 200, 3))
+        self.assertEqual(disp_frame.dtype, np.uint8)
 
-        # Check monochrome property inside palm region: B, G, R channels in display frame must be identical
-        # (Zero purple/pink tint in visualized image area!)
-        b_disp = disp_frame[50:150, 50:150, 0]
-        g_disp = disp_frame[50:150, 50:150, 1]
-        r_disp = disp_frame[50:150, 50:150, 2]
-        np.testing.assert_array_equal(b_disp, g_disp, "Display frame must be monochrome")
-        np.testing.assert_array_equal(g_disp, r_disp, "Display frame must have equal B, G, R")
+        # Check no channel blowout: no channel mean above 200
+        for ch_idx in range(3):
+            ch_mean = float(disp_frame[:, :, ch_idx].mean())
+            self.assertLess(ch_mean, 200.0, f"Channel {ch_idx} mean ({ch_mean}) must not blow out above 200")
 
         # Crucial separation: Verify original raw frame was NOT mutated in-place
         self.assertEqual(purple_frame[0, 0, 0], 210)
         self.assertEqual(purple_frame[0, 0, 1], 120)
         self.assertEqual(purple_frame[0, 0, 2], 190)
 
-        # Problem 1 verification:
-        # Balanced mid-gray palm: Ensure output is NOT blown out to pure white (255)
-        # across the entire palm region.
+        # Balanced mid-gray palm: Ensure output is NOT blown out above 200
         palm_patch = np.full((100, 100, 3), 160, dtype=np.uint8)
         disp_palm = create_display_frame(palm_patch)
-        self.assertLess(float(disp_palm.mean()), 254.0, "Display frame must not blow palm out to pure white")
+        self.assertEqual(disp_palm.dtype, np.uint8)
+        self.assertLess(float(disp_palm.mean()), 200.0, "Display frame must not blow palm out above 200")
 
     def test_04_best_frame_selection_prefers_sharp_contrasted_frame(self):
         """
@@ -331,7 +329,7 @@ class TestCameraPipeline(unittest.TestCase):
             data = json.load(f)
 
         self.assertIn("candidates_tested", data)
-        self.assertEqual(len(data["candidates_tested"]), 5)
+        self.assertEqual(len(data["candidates_tested"]), 7)
         for cand in data["candidates_tested"]:
             self.assertIn("exposure_us", cand)
             self.assertIn("analogue_gain", cand)

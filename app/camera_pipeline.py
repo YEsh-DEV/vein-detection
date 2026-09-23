@@ -111,62 +111,64 @@ def extract_nir_channel(frame: np.ndarray, method: Optional[str] = None) -> np.n
 # ---------------------------------------------------------------------------
 def create_display_frame(raw_bgr: np.ndarray, method: Optional[str] = None) -> np.ndarray:
     """
-    Display pipeline with hotspot suppression and percentile normalization.
-    Designed for close-range 850nm LED which creates bright central hotspot.
+    Display pipeline for 850nm NIR NoIR camera.
+    NO homomorphic division — that inverts contrast on this hardware.
+    Uses percentile normalization + mild CLAHE only.
     """
     if raw_bgr is None:
         return None
 
-    nir = extract_nir_channel(raw_bgr, method=method)
+    if raw_bgr.ndim == 2:
+        nir = raw_bgr.astype(np.float32)
+    else:
+        # Step 1: Extract NIR-weighted channel (R=0.50, G=0.25, B=0.25)
+        b = raw_bgr[:, :, 0].astype(np.float32)
+        g = raw_bgr[:, :, 1].astype(np.float32)
+        r = raw_bgr[:, :, 2].astype(np.float32)
+        nir = (0.50 * r + 0.25 * g + 0.25 * b)
 
-    # Step 1: Suppress specular hotspot using local mean normalization
-    # Blur gives us the "background illumination envelope"
-    h, w = nir.shape[:2]
-    k = 61
-    if h < 61 or w < 61:
-        k = max(3, (min(h, w) // 2) * 2 - 1)
-    illumination_map = cv2.GaussianBlur(nir, (k, k), 0)
-
-    # Divide out uneven illumination (homomorphic-style correction)
-    nir_corrected = np.clip(
-        (nir.astype(np.float32) / (illumination_map.astype(np.float32) + 1e-6)) * 100.0,
-        0, 255
-    ).astype(np.uint8)
-
-    # Step 2: Percentile-clipped normalization on corrected image
-    lo = np.percentile(nir_corrected, DISPLAY_PERCENTILE_LOW)    # 5.0
-    hi = np.percentile(nir_corrected, DISPLAY_PERCENTILE_HIGH)   # 90.0
-    if hi - lo < 10:
-        hi = lo + 10
+    # Step 2: Percentile-clipped normalization
+    # P3 to P92 keeps palm mid-tones in 80-160 range without blowout
+    lo = np.percentile(nir, DISPLAY_PERCENTILE_LOW)    # 3.0
+    hi = np.percentile(nir, DISPLAY_PERCENTILE_HIGH)   # 92.0
+    if hi - lo < 15:
+        hi = lo + 15
     nir_norm = np.clip(
-        (nir_corrected.astype(np.float32) - lo) / (hi - lo) * 255.0,
-        0, 255
+        (nir - lo) / (hi - lo) * 255.0, 0, 255
     ).astype(np.uint8)
 
-    # Step 3: Gentle CLAHE (low clip to avoid amplifying noise)
-    clahe = cv2.createCLAHE(clipLimit=DISPLAY_CLAHE_CLIP, tileGridSize=(8, 8))
+    # Step 3: Mild CLAHE — enhances vein structure without amplifying noise
+    clahe = cv2.createCLAHE(
+        clipLimit=DISPLAY_CLAHE_CLIP,      # 1.5
+        tileGridSize=DISPLAY_CLAHE_GRID    # (8, 8)
+    )
     enhanced = clahe.apply(nir_norm)
 
-    # Step 4: Light denoise
+    # Step 4: Very light denoise to reduce sensor noise
     enhanced = cv2.GaussianBlur(enhanced, (3, 3), 0)
 
-    # Step 5: Guide box overlay
-    h, w = enhanced.shape[:2]
+    # Step 5: Convert to BGR and add guide box
     display = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
-    bx1, by1, bx2, by2 = int(w * 0.15), int(h * 0.05), int(w * 0.85), int(h * 0.95)
-    corner = min(25, int(w * 0.1), int(h * 0.1))
-    col, thick = (0, 220, 0), 2
+    h, w = display.shape[:2]
+    bx1 = int(w * 0.15)
+    by1 = int(h * 0.05)
+    bx2 = int(w * 0.85)
+    by2 = int(h * 0.95)
+    corner_len = min(22, max(5, int(w * 0.1)))
+    col = (0, 220, 0)
+    thick = 2
     for cx, cy in [(bx1, by1), (bx2, by1), (bx1, by2), (bx2, by2)]:
-        dx = corner if cx == bx1 else -corner
-        dy = corner if cy == by1 else -corner
+        dx = corner_len if cx == bx1 else -corner_len
+        dy = corner_len if cy == by1 else -corner_len
         cv2.line(display, (cx, cy), (cx + dx, cy), col, thick)
         cv2.line(display, (cx, cy), (cx, cy + dy), col, thick)
-    if by1 >= 10:
-        cv2.putText(display, "Place palm here | 10-14cm", (bx1, by1 - 8),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, col, 1)
-    else:
-        cv2.putText(display, "Place palm here | 10-14cm", (bx1, by1 + 15),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, col, 1)
+    ty = (by1 - 8) if by1 >= 12 else (by1 + 15)
+    cv2.putText(
+        display,
+        "Place palm here | 10-14cm",
+        (bx1, ty),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.45, col, 1
+    )
     return display
 
 

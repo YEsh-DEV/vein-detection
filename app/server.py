@@ -163,16 +163,16 @@ def init_hardware_camera():
         # Explicitly configure hardware controls for 850nm NoIR imaging:
         # 1. Disable Auto White Balance (prevents daylight color gains from creating a pink/purple tint)
         # 2. Lock neutral ColourGains (1.0, 1.0)
-        # 3. Lock calibrated exposure (10,000 µs) and gain (1.2)
+        # 3. Lock calibrated exposure (14,000 µs) and gain (1.5)
         try:
             p.set_controls({
                 "AeEnable": False,
                 "AwbEnable": False,
                 "ColourGains": (1.0, 1.0),
-                "ExposureTime": 10000,
-                "AnalogueGain": 1.2,
+                "ExposureTime": 14000,
+                "AnalogueGain": 1.5,
             })
-            print(f"[+] Picamera2 camera hardware controls locked: Exposure=10000µs, Gain=1.2, AwbEnable=False")
+            print(f"[+] Picamera2 camera hardware controls locked: Exposure=14000µs, Gain=1.5, AwbEnable=False")
         except Exception as ctrl_err:
             print(f"[!] Warning: Failed setting initial Picamera2 controls ({ctrl_err})")
 
