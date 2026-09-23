@@ -68,10 +68,31 @@ os.makedirs(LOGS_DIR, exist_ok=True)
 # Feature flag for engine selection: 'v2' (AMPVNet CNN) or 'legacy' (Gabor+MNHD)
 BIOMETRIC_ENGINE = os.environ.get("BIOMETRIC_ENGINE", "v2").lower()
 
-# EXPERIMENTAL MATCH THRESHOLD (Phase 8):
-# Derived from Stage-2 validation set EER (0.2226).
-# Marked EXPERIMENTAL: can be overridden via MATCH_THRESHOLD environment variable.
-EXPERIMENTAL_MATCH_THRESHOLD = float(os.environ.get("MATCH_THRESHOLD", "0.2226"))
+# CALIBRATED DEMO MATCH THRESHOLD (Phase 13 — Stage-5 Threshold Recalibration):
+# Previous value: 0.2226 (EER-derived from Stage-2 synthetic validation split).
+# Problem at 0.2226: FAR = 41.32% (2159/5225 impostor pairs accepted) on real NIR hardware.
+#
+# Stage-5 recalibration used the global ROC curve from 131 genuine + 5225 impostor pairs
+# (38 palm identities, Raspberry Pi 850nm NIR sensor).
+#
+# Threshold sweep (global):
+#   0.2226 → FAR=41.32%, TAR=92.37%
+#   0.40   → FAR=17.05%, TAR=83.97%   (near global EER @ 0.41)
+#   0.45   → FAR=11.98%, TAR=80.15%   ← SELECTED
+#   0.50   → FAR= 7.94%, TAR=74.81%
+#   0.63   → FAR= 1.00%, TAR=63.36%
+#
+# Selection rationale:
+#   Validation-split EER is at threshold≈0.437 (N=18 genuine, N=135 impostor).
+#   0.45 is just above that, providing substantial FAR reduction (41.32%→11.98%)
+#   while retaining demo-viable TAR (80.15%).
+#   Higher thresholds (0.50+) would reject too many genuine users in live demo.
+#
+# Limitation: Dataset is DATA-LIMITED (131 genuine pairs). Numbers are indicative only.
+# System remains CATEGORY B: WORKING PROTOTYPE (DATA-LIMITED).
+#
+# Can be overridden at runtime via MATCH_THRESHOLD environment variable.
+EXPERIMENTAL_MATCH_THRESHOLD = float(os.environ.get("MATCH_THRESHOLD", "0.45"))
 MATCH_THRESHOLD = EXPERIMENTAL_MATCH_THRESHOLD
 
 # Enrollment Validation Bounds & Consistency

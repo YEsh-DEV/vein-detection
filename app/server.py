@@ -265,9 +265,19 @@ class DeleteReq(BaseModel):
 
 
 class ScanResponse(BaseModel):
+    """
+    Public API response for /api/scan.
+
+    Security boundary:
+      accepted=True  → username, score, threshold all present
+      accepted=False → username=null, score=-1.0 (sentinel), threshold present
+
+    ranked_candidates and internal diagnostic scores are NEVER sent to the client.
+    They are written to logs/scan_diagnostics.jsonl for research purposes only.
+    """
     accepted: bool
-    username: Optional[str]
-    score: float
+    username: Optional[str]   # null when rejected
+    score: float              # -1.0 sentinel when rejected; do NOT expose candidate score
     threshold: float
     time_ms: int
     clahe_base64: str
@@ -904,20 +914,31 @@ async def scan_palm():
         )
 
     t_total_ms = round((time.time() - t0) * 1000, 2)
-    username = search_diag["username"]
-    score = search_diag["score"]
-    user_id = search_diag["user_id"]
-    accepted = search_diag["accepted"]
+    # Internal diagnostics — kept server-side only, never sent to client when rejected
+    _internal_username = search_diag["username"]    # None when rejected
+    _internal_score    = search_diag["score"]        # best cosine score (internal)
+    _internal_user_id  = search_diag["user_id"]     # None when rejected
+    accepted           = search_diag["accepted"]
 
-    # Pass resolved winning user_id when accepted=True
+    # Log the threshold used for this decision
+    print(
+        f"[scan] threshold={MATCH_THRESHOLD:.4f} "
+        f"best_score={_internal_score:.4f} "
+        f"accepted={accepted} "
+        f"candidate={'<hidden>' if not accepted else _internal_username}"
+    )
+
+    # Pass resolved winning user_id when accepted=True; NULL for rejected (no identity reveal)
     await run_in_threadpool(
         log_access,
-        user_id=user_id if accepted else None,
-        score=score,
+        user_id=_internal_user_id if accepted else None,
+        score=_internal_score,     # store actual score internally for audit
         accepted=accepted,
         engine=BIOMETRIC_ENGINE
     )
-    cap_path, roi_path = await run_in_threadpool(save_capture_to_disk, gray, clahe_roi, username or "unknown", "scan")
+    cap_path, roi_path = await run_in_threadpool(
+        save_capture_to_disk, gray, clahe_roi, _internal_username or "unknown", "scan"
+    )
 
     # Stage Latency Breakdown (Capture, Landmark, ROI, CNN Embedding, Matching, Total)
     latency_breakdown = {
@@ -929,7 +950,8 @@ async def scan_palm():
         "total": t_total_ms,
     }
 
-    # Structured per-scan diagnostic logging
+    # Internal JSONL diagnostic log — contains full ranked_candidates for research
+    # IMPORTANT: this data MUST NOT be forwarded to the HTTP response
     await run_in_threadpool(
         log_scan_diagnostic,
         cap_path, roi_path, search_diag, latency_breakdown
@@ -939,10 +961,21 @@ async def scan_palm():
     _, buf = cv2.imencode(".png", clahe_roi)
     b64_roi = base64.b64encode(buf).decode("utf-8")
 
+    # ── PUBLIC RESPONSE BOUNDARY ──────────────────────────────────────────────
+    # SECURITY: Rejected results MUST NOT expose the nearest candidate identity,
+    #           score, ranking, or template IDs. The internal diagnostics above
+    #           remain in logs only.
+    #
+    # accepted=True:  username=<enrolled name>, score=actual similarity
+    # accepted=False: username=null,            score=-1.0 (opaque sentinel)
+    # ─────────────────────────────────────────────────────────────────────────
+    public_username = _internal_username if accepted else None
+    public_score    = float(_internal_score) if accepted else -1.0
+
     return {
         "accepted": accepted,
-        "username": username,
-        "score": float(score),
+        "username": public_username,
+        "score": public_score,
         "threshold": float(MATCH_THRESHOLD),
         "time_ms": int(t_total_ms),
         "clahe_base64": b64_roi,

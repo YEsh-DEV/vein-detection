@@ -134,12 +134,22 @@ def diagnose_hand_positioning(gray_img: np.ndarray) -> dict:
     elif occupancy < 0.20:
         reason = "HAND_TOO_FAR"
         instruction = "Hand is too far — move closer to the camera sensor."
-    elif occupancy > 0.54 or (border_touches >= 3 and occupancy > 0.40):
+    elif (
+        # Case A: Extreme occupancy regardless of borders → genuinely too close (palm fills frame)
+        occupancy > 0.62
+        or
+        # Case B: Moderate-high occupancy WITH confirmed frame boundary clipping
+        # Requires 2+ border sides touched and occupancy > 0.42.
+        # This preserves detection for hands that are close AND clipped by the frame,
+        # while allowing spread fingers (which raise occupancy to 0.45–0.58) to pass.
+        (border_touches >= 2 and occupancy > 0.42)
+    ):
         reason = "HAND_TOO_CLOSE"
         instruction = "Hand is too close — move hand farther from lens (~10-15cm)."
     else:
         reason = "NORMAL"
         instruction = "Hand positioning appears normal."
+
 
     return {
         "reason": reason,
@@ -199,16 +209,20 @@ def detect_hand_landmarks_with_diagnostics(gray_img: np.ndarray, landmarker) -> 
             fail_reason = CODE_QUALITY_LOW_CONTRAST
             fail_instruction = "Lighting or contrast too low. Ensure proper illumination and hold hand steady."
         else:
-            # MediaPipe failed despite normal occupancy (e.g. boundary clip or orientation)
-            if diag["borders"]["top"] or diag["borders"]["bottom"] or diag["occupancy_pct"] > 45.0:
+            # MediaPipe failed despite normal heuristic result (e.g. severe blur, orientation)
+            # Only classify as HAND_TOO_CLOSE if occupancy is extremely high (≥63%)
+            # OR top/bottom clipping (finger-tips cut off by frame edge).
+            # Spread fingers can legitimately push occupancy to 45–58%; do NOT misclassify them.
+            if diag["occupancy_pct"] > 63.0 or (diag["borders"]["top"] and diag["borders"]["bottom"]):
                 fail_reason = CODE_HAND_TOO_CLOSE
                 fail_instruction = "Hand is too close or fingers cropped — move hand slightly farther (~10-15cm)."
-            elif diag["borders"]["left"] or diag["borders"]["right"]:
+            elif diag["borders"]["left"] or diag["borders"]["right"] or diag["borders"]["top"] or diag["borders"]["bottom"]:
                 fail_reason = CODE_HAND_OUTSIDE_FRAME
                 fail_instruction = "Hand off-center — center palm within the guide frame."
             else:
                 fail_reason = CODE_MEDIAPIPE_NO_LANDMARKS
                 fail_instruction = "Hand landmarks not detected. Hold palm flat with fingers slightly spread ~10-15cm above camera."
+
 
         return {
             "success": False,
