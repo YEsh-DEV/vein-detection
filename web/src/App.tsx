@@ -632,18 +632,16 @@ export default function App() {
 
   return (
     <ErrorBoundary>
-      <div className="min-h-screen bg-dribbble-yellow flex justify-center items-center p-0 sm:p-2 text-[#121212] select-none font-sans overflow-hidden">
+      <div className="w-screen h-screen bg-[#FFFDF0] flex justify-center items-center p-0 text-[#121212] select-none font-sans overflow-hidden">
        
-        {/* ── 5" RASPBERRY PI TOUCH DISPLAY FRAME (Tilted 90° for Portrait Kiosk Mounting) ── */}
+        {/* ── FULLSCREEN RASPBERRY PI TOUCH DISPLAY FRAME (Edge-to-Edge Fullscreen) ── */}
         <div 
-          className="bg-[#FFFDF0] border-[4px] border-black rounded-[24px] shadow-[8px_8px_0px_#121212] flex flex-col relative overflow-hidden bg-neo-cream shrink-0"
+          className="w-full h-full bg-[#FFFDF0] flex flex-col relative overflow-hidden bg-neo-cream shrink-0"
           style={{
             transform: rotation !== 0 ? `rotate(${rotation}deg)` : undefined,
             transformOrigin: 'center center',
-            width: isRotated ? 'min(760px, 96vh)' : 'min(760px, 98vw)',
-            height: isRotated ? 'min(1200px, 96vw)' : 'min(1200px, 98vh)',
-            maxWidth: isRotated ? '96vh' : '760px',
-            maxHeight: isRotated ? '96vw' : '1200px',
+            width: isRotated ? '100vh' : '100vw',
+            height: isRotated ? '100vw' : '100vh',
             transition: 'transform 0.35s cubic-bezier(0.4, 0, 0.2, 1), width 0.35s ease, height 0.35s ease',
           }}
         >
@@ -707,7 +705,7 @@ export default function App() {
               - Two clear, big action buttons with text inside
              ══════════════════════════════════════════════════════════════════════ */}
           {appState === 'idle' && (
-            <div className="flex-1 flex flex-col items-center justify-between p-6 animate-fadeIn relative overflow-y-auto select-none">
+            <div className="flex-1 flex flex-col items-center justify-between p-6 animate-fadeIn relative overflow-y-auto select-none w-full max-w-[800px] mx-auto">
               
               {/* Minimal Top Status Pill */}
               <div className="w-full flex justify-center items-center z-10 pt-1">
@@ -875,7 +873,7 @@ export default function App() {
               - Clean 3-second countdown
              ══════════════════════════════════════════════════════════════════════ */}
           {appState === 'scan' && (
-            <div className="flex-1 flex flex-col p-4 space-y-3 animate-fadeIn overflow-y-auto pb-4">
+            <div className="flex-1 flex flex-col p-4 sm:p-6 space-y-3 animate-fadeIn overflow-y-auto pb-6 w-full max-w-[800px] mx-auto">
              
               {/* Header Bar: Centered Mode Badge (Duplicate top buttons removed) */}
               <div className="flex items-center justify-center">
@@ -1003,7 +1001,7 @@ export default function App() {
               - Prominent Save Enrollment button when >=3 samples ready
              ══════════════════════════════════════════════════════════════════════ */}
           {appState === 'enroll' && (
-            <div className="flex-1 flex flex-col p-4 space-y-3 animate-fadeIn overflow-y-auto pb-4">
+            <div className="flex-1 flex flex-col p-4 sm:p-6 space-y-3 animate-fadeIn overflow-y-auto pb-6 w-full max-w-[800px] mx-auto">
              
               {/* Header: Title + Mode Toggle Buttons */}
               <div className="flex items-center justify-between border-b-[2px] border-black/10 pb-2">
