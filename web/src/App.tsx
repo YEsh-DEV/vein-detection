@@ -684,16 +684,10 @@ export default function App() {
               PALM VEIN BIOMETRICS
             </div>
 
-            <div className="flex items-center gap-2.5">
+            <div className="flex items-center gap-2">
               <div className="text-[11px] font-mono font-black text-[#555]">
                 {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
               </div>
-              <img 
-                src="/ntllogo.png" 
-                alt="Nexus Lab Logo" 
-                title="Nexus Lab"
-                className="h-8 w-8 object-contain select-none hover:scale-105 transition-transform" 
-              />
             </div>
           </div>
 
@@ -718,12 +712,14 @@ export default function App() {
           {appState === 'idle' && (
             <div className="flex-1 flex flex-col items-center justify-between p-6 animate-fadeIn relative overflow-y-auto select-none w-full max-w-[800px] mx-auto">
               
-              {/* Minimal Top Status Pill */}
-              <div className="w-full flex justify-center items-center z-10 pt-1">
-                <div className="px-4 py-1 bg-white border-[2px] border-black rounded-full text-[11px] font-black shadow-[2px_2px_0px_#121212] flex items-center gap-2">
-                  <span className="w-2 h-2 rounded-full bg-[#CCFF00] animate-pulse" />
-                  <span>TERMINAL READY</span>
-                </div>
+              {/* Nexus Lab Brand Logo — centered in the middle instead of terminal ready */}
+              <div className="w-full flex justify-center items-center z-10 pt-1 pb-1">
+                <img 
+                  src="/ntllogo.png" 
+                  alt="Nexus Lab Logo" 
+                  title="Nexus Lab"
+                  className="h-11 sm:h-12 w-auto object-contain select-none filter drop-shadow-[0_2px_4px_rgba(0,0,0,0.12)] hover:scale-105 transition-transform" 
+                />
               </div>
 
               {/* Center Card: Soft, Simple, Minimal */}
