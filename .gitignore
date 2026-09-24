@@ -33,9 +33,6 @@ logs/*.jsonl
 logs/analysis/
 !logs/.gitkeep
 
-# ── MediaPipe model (large binary — auto-downloaded by ensure_model_exists) ────
-hand_landmarker.task
-models/hand_landmarker.task
 
 # ── Test/sample images ────────────────────────────────────────────────────────
 *.bmp

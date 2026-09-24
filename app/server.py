@@ -135,6 +135,7 @@ _camera_lock = threading.Lock()
 # Hardware & Engine Globals
 engine = None
 landmarker = None
+LANDMARKER_ERROR_DETAIL = None
 picam2 = None
 cv_cap = None
 CAMERA_AVAILABLE = False
@@ -267,6 +268,7 @@ def release_hardware_camera():
 async def lifespan(app: FastAPI):
     global engine, landmarker
     print("[*] Initializing SQLite database...")
+    global landmarker, LANDMARKER_ERROR_DETAIL, engine
     init_db()
 
     print("[*] Initializing MediaPipe Hand Landmarker...")
@@ -274,6 +276,7 @@ async def lifespan(app: FastAPI):
         landmarker = build_landmarker(MODEL_PATH)
         print("[+] MediaPipe Hand Landmarker ready.")
     except Exception as e:
+        LANDMARKER_ERROR_DETAIL = str(e)
         print(f"[!] Warning: Hand Landmarker failed to load ({e}).")
 
     print("[*] Initializing Biometric Search Engine (In-RAM Cosine)...")
@@ -930,6 +933,15 @@ def capture_burst_and_process_scan(
 # ---------------------------------------------------------------------------
 # API Endpoints
 # ---------------------------------------------------------------------------
+def get_model_error_summary() -> Optional[str]:
+    """Returns combined status explanation if any biometric model component failed."""
+    if not MODEL_LOADED:
+        return MODEL_ERROR_DETAIL or "Biometric ONNX model not loaded."
+    if landmarker is None:
+        return LANDMARKER_ERROR_DETAIL or f"MediaPipe Hand Landmarker model missing or failed ({MODEL_PATH})."
+    return None
+
+
 @app.get("/health")
 @app.get("/api/health")
 def health_check():
@@ -938,7 +950,7 @@ def health_check():
         "status": "healthy",
         "engine": BIOMETRIC_ENGINE,
         "model_loaded": (landmarker is not None and MODEL_LOADED),
-        "model_error": MODEL_ERROR_DETAIL if not MODEL_LOADED else None,
+        "model_error": get_model_error_summary(),
         "camera_available": CAMERA_AVAILABLE,
     }
 
@@ -998,7 +1010,7 @@ async def get_status():
         "camera_device": CAMERA_DEVICE,
         "camera_error": CAMERA_ERROR_DETAIL if not CAMERA_AVAILABLE else None,
         "model_loaded": (landmarker is not None and MODEL_LOADED),
-        "model_error": MODEL_ERROR_DETAIL if not MODEL_LOADED else None,
+        "model_error": get_model_error_summary(),
         "enrolled_users_count": len(users),
         "total_templates": len(emb_data["template_ids"]),
         "match_threshold": float(MATCH_THRESHOLD),
