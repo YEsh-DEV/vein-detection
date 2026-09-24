@@ -6,7 +6,7 @@ Regression tests for Phase 13 biometric hardening:
 
   THRESHOLD TESTS (Task 1 / Task 10):
     T1. MATCH_THRESHOLD default is > 0.2226
-    T2. MATCH_THRESHOLD default is exactly 0.45 (selected calibrated value)
+    T2. MATCH_THRESHOLD default is exactly 0.75 (selected calibrated value)
     T3. MATCH_THRESHOLD is overridable via MATCH_THRESHOLD env variable
     T4. SearchEngine accepts score >= threshold (genuine accepted)
     T5. SearchEngine rejects score < threshold (unknown rejected)
@@ -67,14 +67,14 @@ class TestThresholdConfiguration(unittest.TestCase):
         )
 
     def test_t2_threshold_default_is_calibrated_value(self):
-        """T2: Default MATCH_THRESHOLD without env override must be 0.45 (selected from val-EER)."""
+        """T2: Default MATCH_THRESHOLD without env override must be 0.75 (calibrated zero-false-accept value)."""
         # Re-evaluate what the default would be without env override
         saved = os.environ.pop("MATCH_THRESHOLD", None)
         try:
-            default_val = float(os.environ.get("MATCH_THRESHOLD", "0.45"))
+            default_val = float(os.environ.get("MATCH_THRESHOLD", "0.75"))
             self.assertAlmostEqual(
-                default_val, 0.45, places=4,
-                msg="Default threshold must be calibrated value 0.45"
+                default_val, 0.75, places=4,
+                msg="Default threshold must be calibrated value 0.75"
             )
         finally:
             if saved is not None:
@@ -85,7 +85,7 @@ class TestThresholdConfiguration(unittest.TestCase):
         os.environ["MATCH_THRESHOLD"] = "0.60"
         try:
             # Re-read as constants module would
-            overridden = float(os.environ.get("MATCH_THRESHOLD", "0.45"))
+            overridden = float(os.environ.get("MATCH_THRESHOLD", "0.75"))
             self.assertAlmostEqual(overridden, 0.60, places=4)
         finally:
             del os.environ["MATCH_THRESHOLD"]

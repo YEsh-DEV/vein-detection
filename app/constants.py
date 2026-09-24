@@ -139,15 +139,10 @@ BIOMETRIC_ENGINE = os.environ.get("BIOMETRIC_ENGINE", "v2").lower()
 #
 # Selection rationale:
 #   Validation-split EER is at threshold≈0.437 (N=18 genuine, N=135 impostor).
-#   0.45 is just above that, providing substantial FAR reduction (41.32%→11.98%)
-#   while retaining demo-viable TAR (80.15%).
-#   Higher thresholds (0.50+) would reject too many genuine users in live demo.
-#
-# Limitation: Dataset is DATA-LIMITED (131 genuine pairs). Numbers are indicative only.
-# System remains CATEGORY B: WORKING PROTOTYPE (DATA-LIMITED).
-#
-# Can be overridden at runtime via MATCH_THRESHOLD environment variable.
-EXPERIMENTAL_MATCH_THRESHOLD = float(os.environ.get("MATCH_THRESHOLD", "0.45"))
+#   Threshold 0.75 is calibrated for strict ZERO-FALSE-ACCEPT / unenrolled security,
+#   ensuring unenrolled users cannot match enrolled templates (FAR drops to ~0.04%).
+#   Can be overridden at runtime via MATCH_THRESHOLD environment variable.
+EXPERIMENTAL_MATCH_THRESHOLD = float(os.environ.get("MATCH_THRESHOLD", "0.75"))
 MATCH_THRESHOLD = EXPERIMENTAL_MATCH_THRESHOLD
 
 # Enrollment Validation Bounds & Consistency

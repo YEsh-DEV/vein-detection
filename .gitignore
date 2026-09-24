@@ -30,6 +30,7 @@ training/logs/
 *.db-shm
 *.db-wal
 logs/*.jsonl
+logs/analysis/
 !logs/.gitkeep
 
 # ── MediaPipe model (large binary — auto-downloaded by ensure_model_exists) ────
