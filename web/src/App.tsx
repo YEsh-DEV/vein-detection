@@ -680,8 +680,11 @@ export default function App() {
               </button>
             </div>
 
-            <div className="text-center font-display font-black text-xs tracking-wider uppercase text-black">
-              PALM VEIN BIOMETRICS
+            <div className="flex items-center gap-2">
+              <img src="/ntllogo.png" alt="Nexus Lab" className="w-5 h-5 object-contain" />
+              <div className="text-center font-display font-black text-xs tracking-wider uppercase text-black">
+                PALM VEIN BIOMETRICS
+              </div>
             </div>
 
             <div className="flex items-center gap-2">
@@ -705,42 +708,52 @@ export default function App() {
 
           {/* ══════════════════════════════════════════════════════════════════════
               SCREEN 1: IDLE / HOME SCREEN
+              - Prominent Nexus Lab Emblem centered at the top
               - Soft, minimal, clean aesthetic
-              - NO instructions on the home page (per user requirement)
               - Accommodates BOTH palms
-              - Two clear, big action buttons with text inside
+              - Two clear action buttons with text inside
              ══════════════════════════════════════════════════════════════════════ */}
           {appState === 'idle' && (
-            <div className="flex-1 flex flex-col items-center justify-between p-6 animate-fadeIn relative overflow-y-auto select-none w-full max-w-[800px] mx-auto">
+            <div className="flex-1 flex flex-col items-center justify-between p-4 sm:p-6 animate-fadeIn relative overflow-y-auto select-none w-full max-w-[800px] mx-auto">
               
-              {/* Minimal Top Status Pill */}
-              <div className="w-full flex justify-center items-center z-10 pt-1">
-                <div className="px-4 py-1 bg-white border-[2px] border-black rounded-full text-[11px] font-black shadow-[2px_2px_0px_#121212] flex items-center gap-2">
-                  <span className="w-2 h-2 rounded-full bg-[#CCFF00] animate-pulse" />
-                  <span>TERMINAL READY</span>
+              {/* ── NEXUS LAB BRAND LOGO (TOP CENTER) ── */}
+              <div className="w-full flex flex-col items-center justify-center z-10 pt-1 pb-2">
+                <div className="relative group">
+                  <div className="w-18 h-18 sm:w-22 sm:h-22 bg-white border-[3.5px] border-black rounded-3xl shadow-[5px_5px_0px_#121212] flex items-center justify-center p-2.5 neo-card hover:scale-105 transition-transform overflow-hidden">
+                    <img
+                      src="/ntllogo.png"
+                      alt="Nexus Lab Logo"
+                      className="w-full h-full object-contain filter drop-shadow-[0_3px_5px_rgba(0,0,0,0.2)]"
+                    />
+                  </div>
+                  <div className="absolute -bottom-2 inset-x-0 flex justify-center">
+                    <span className="px-2.5 py-0.5 bg-[#38BDF8] text-black border-[2px] border-black rounded-full text-[10px] font-black uppercase tracking-wider shadow-[2px_2px_0px_#121212] whitespace-nowrap">
+                      NEXUS LAB
+                    </span>
+                  </div>
                 </div>
               </div>
 
               {/* Center Card: Soft, Simple, Minimal */}
-              <div className="w-full max-w-[530px] bg-[#FFFDF0] border-[4px] border-black rounded-3xl p-6 sm:p-7 shadow-[8px_8px_0px_#121212] flex flex-col items-center text-center my-auto z-10">
+              <div className="w-full max-w-[530px] bg-[#FFFDF0] border-[4px] border-black rounded-3xl p-5 sm:p-6 shadow-[8px_8px_0px_#121212] flex flex-col items-center text-center my-auto z-10">
                
-                {/* Soft Minimal Biometric Palm Icon */}
-                <div className="relative my-2 w-20 h-20 rounded-3xl bg-white border-[3.5px] border-black shadow-[4px_4px_0px_#121212] flex items-center justify-center">
-                  <Scan className="w-14 h-14 text-[#FFDE59] stroke-[2.5]" />
-                  <Hand className="w-8 h-8 text-black stroke-[2] absolute" />
+                {/* Minimal Top Status Pill */}
+                <div className="inline-flex items-center gap-1.5 px-3 py-1 bg-white border-[2px] border-black rounded-full text-[10px] font-black shadow-[2px_2px_0px_#121212] mb-2">
+                  <span className="w-2 h-2 rounded-full bg-[#CCFF00] animate-pulse" />
+                  <span>TERMINAL READY</span>
                 </div>
 
-                <div className="space-y-2 mt-3">
-                  <h1 className="font-display font-black text-2xl sm:text-3xl leading-tight uppercase tracking-tight">
+                <div className="space-y-1.5 mt-1">
+                  <h1 className="font-display font-black text-2xl sm:text-3xl leading-tight uppercase tracking-tight text-black">
                     Present your palm<br />to begin
                   </h1>
                   <p className="text-xs sm:text-sm font-bold text-[#555] max-w-[340px] mx-auto leading-snug">
-                    Hold your hand flat, 40 cm above the sensor. No contact needed
+                    Hold your hand flat, 20–40 cm above the sensor. No contact needed
                   </p>
                 </div>
 
                 {/* ── SIDE-BY-SIDE RECTANGULAR ACTION BUTTONS ── */}
-                <div className="w-full grid grid-cols-2 gap-3 mt-6">
+                <div className="w-full grid grid-cols-2 gap-3 mt-4 sm:mt-5">
                   
                   {/* BUTTON 1: SCAN PALM (SIDE-BY-SIDE RECTANGULAR BUTTON) */}
                   <button
