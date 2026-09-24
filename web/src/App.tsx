@@ -147,14 +147,29 @@ function CameraViewport({
   );
 }
 
-// ── 6 Dynamic Sample Instructions for Enrollment ──
+// ── 6-Sample Enrollment Guidance (Multi-Height & Pose Strategy) ──
+interface EnrollGuidanceStep {
+  sample: number;
+  distance: string;
+  instruction: string;
+}
+
+const ENROLL_SAMPLE_STEPS: EnrollGuidanceStep[] = [
+  { sample: 1, distance: "20cm", instruction: "Hold palm close, flat" },
+  { sample: 2, distance: "30cm", instruction: "Hold palm mid height" },
+  { sample: 3, distance: "40cm", instruction: "Hold palm at top" },
+  { sample: 4, distance: "20cm", instruction: "Slight left tilt" },
+  { sample: 5, distance: "30cm", instruction: "Slight right tilt" },
+  { sample: 6, distance: "35cm", instruction: "Natural relaxed position" },
+];
+
 const ENROLL_SAMPLE_INSTRUCTIONS = [
-  "Sample 1: Keep palm flat and centered over sensor",
-  "Sample 2: Tilt palm slightly to the left",
-  "Sample 3: Tilt palm slightly to the right",
-  "Sample 4: Tilt palm slightly upwards",
-  "Sample 5: Tilt palm slightly downwards",
-  "Sample 6: Hold palm flat for final calibration",
+  "Sample #1 (20cm): Hold palm close, flat",
+  "Sample #2 (30cm): Hold palm mid height",
+  "Sample #3 (40cm): Hold palm at top",
+  "Sample #4 (20cm): Slight left tilt",
+  "Sample #5 (30cm): Slight right tilt",
+  "Sample #6 (35cm): Natural relaxed position",
 ];
 
 // ── Error Boundary ──
@@ -432,7 +447,7 @@ export default function App() {
       return;
     }
 
-    const currentHint = ENROLL_SAMPLE_INSTRUCTIONS[enrollSamples.length] || 'Hold palm steady ~10-15cm above sensor';
+    const currentHint = ENROLL_SAMPLE_INSTRUCTIONS[enrollSamples.length] || 'Hold palm steady above sensor';
     setEnrollStatusMsg(`${currentHint} (Capturing in 3 seconds...)`);
 
     // 3-Second Countdown
@@ -480,9 +495,9 @@ export default function App() {
         const rawDetail = err.detail || err.error_code || 'Hand not detected';
         let friendlyMsg = rawDetail;
         if (rawDetail.includes('farther') || rawDetail.includes('too close') || rawDetail === 'HAND_TOO_CLOSE') {
-          friendlyMsg = 'Hand too close — move hand farther (~10-15cm) from lens.';
+          friendlyMsg = 'Hand too close — move hand farther from lens.';
         } else if (rawDetail.includes('closer') || rawDetail.includes('too far') || rawDetail === 'HAND_TOO_FAR') {
-          friendlyMsg = 'Hand too far — move hand closer to sensor (~10-15cm).';
+          friendlyMsg = 'Hand too far — move hand closer to sensor.';
         } else if (rawDetail.includes('center') || rawDetail.includes('outside') || rawDetail === 'HAND_OUTSIDE_FRAME') {
           friendlyMsg = 'Center palm directly within the guide outline.';
         } else if (rawDetail.includes('valleys') || rawDetail.includes('fingers') || rawDetail === 'VALLEY_EXTRACTION_FAILED') {
@@ -1055,13 +1070,30 @@ export default function App() {
 
               {/* Bottom Controls: Compact & Docked at Bottom */}
               <div className="shrink-0 space-y-2 w-full max-w-[640px] mx-auto">
-                {/* ── DYNAMIC INSTRUCTION BANNER ── */}
-                <div className="border-[2px] border-black rounded-xl p-2 shadow-[2px_2px_0px_#121212] bg-[#FFDE59] text-black">
-                  <div className="flex items-center gap-2">
-                    <Info className="w-4 h-4 shrink-0" />
-                    <span className="text-xs font-black leading-tight">
-                      {enrollStatusMsg || ENROLL_SAMPLE_INSTRUCTIONS[enrollSamples.length] || "Calibration complete. Click Save below."}
-                    </span>
+                {/* ── DYNAMIC INSTRUCTION & DISTANCE BANNER ── */}
+                <div className="border-[2.5px] border-black rounded-xl p-2.5 shadow-[3px_3px_0px_#121212] bg-[#FFDE59] text-black">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-6 h-6 rounded-lg bg-black text-[#FFDE59] flex items-center justify-center shrink-0 shadow-[1px_1px_0px_#121212]">
+                      <Info className="w-3.5 h-3.5 stroke-[2.5]" />
+                    </div>
+                    <div className="flex-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 leading-snug">
+                      {enrollStatusMsg ? (
+                        <span className="text-xs font-black tracking-tight">{enrollStatusMsg}</span>
+                      ) : enrollSamples.length < 6 ? (
+                        <>
+                          <span className="px-1.5 py-0.5 bg-black text-[#FFDE59] rounded-md text-[10px] font-black uppercase tracking-wider">
+                            SAMPLE #{enrollSamples.length + 1} ({ENROLL_SAMPLE_STEPS[enrollSamples.length].distance})
+                          </span>
+                          <span className="text-xs font-black tracking-tight">
+                            "{ENROLL_SAMPLE_STEPS[enrollSamples.length].instruction}"
+                          </span>
+                        </>
+                      ) : (
+                        <span className="text-xs font-black tracking-tight text-[#006600]">
+                          ✓ All 6 samples captured! Click Save Enrollment below.
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </div>
 
@@ -1101,7 +1133,10 @@ export default function App() {
                       ) : (
                         <>
                           <Camera className="w-3.5 h-3.5 stroke-[2.5]" />
-                          <span>CAPTURE #{enrollSamples.length + 1}</span>
+                          <span>
+                            CAPTURE #{enrollSamples.length + 1}
+                            {enrollSamples.length < 6 ? ` (${ENROLL_SAMPLE_STEPS[enrollSamples.length].distance})` : ''}
+                          </span>
                         </>
                       )}
                     </button>
@@ -1120,18 +1155,31 @@ export default function App() {
                       {[0, 1, 2, 3, 4, 5].map(idx => {
                         const sample = enrollSamples[idx];
                         const isDone = !!sample;
+                        const isCurrent = idx === enrollSamples.length;
+                        const step = ENROLL_SAMPLE_STEPS[idx];
                         return (
                           <div
                             key={idx}
-                            className={`h-8 rounded-lg border-[1.5px] border-black shadow-[1.5px_1.5px_0px_#121212] flex items-center justify-center font-display font-black text-[11px] transition-all overflow-hidden ${
-                              isDone ? 'bg-[#CCFF00] scale-105' : idx < 3 ? 'bg-[#FFFDF0] text-[#888]' : 'bg-[#F4F4F0] text-[#aaa]'
-                            }`}>
+                            className={`h-9 rounded-lg border-[1.5px] border-black shadow-[1.5px_1.5px_0px_#121212] flex items-center justify-center font-display font-black text-[11px] transition-all overflow-hidden ${
+                              isDone
+                                ? 'bg-[#CCFF00] scale-105'
+                                : isCurrent
+                                ? 'bg-[#FFDE59] border-[2px] shadow-[2px_2px_0px_#121212] scale-105 animate-pulse text-black'
+                                : idx < 3
+                                ? 'bg-[#FFFDF0] text-[#888]'
+                                : 'bg-[#F4F4F0] text-[#aaa]'
+                            }`}
+                            title={`Sample #${idx + 1}: ${step.distance} - ${step.instruction}`}
+                          >
                             {isDone && sample.thumb ? (
                               <img src={`data:image/png;base64,${sample.thumb}`} alt={`Sample ${idx+1}`} className="w-full h-full object-cover" />
                             ) : isDone ? (
                               '✓'
                             ) : (
-                              `#${idx + 1}`
+                              <div className="flex flex-col items-center justify-center leading-none py-0.5 text-center">
+                                <span className="text-[10px] font-black leading-none">#{idx + 1}</span>
+                                <span className="text-[8px] font-bold opacity-80 leading-none mt-0.5">{step.distance}</span>
+                              </div>
                             )}
                           </div>
                         );
