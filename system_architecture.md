@@ -119,11 +119,16 @@ Deterministic: 140-185ms Total Pipeline, Zero Network Vulnerability.
 +-----------------------------------------------------------------------------------+
 ```
 
-### 3.1 Fixed Optical Configuration
+### 3.1 Fixed Optical Configuration & Radiometric Stability
 Subcutaneous vascular imaging requires strict radiometric consistency. Automatic exposure (AE) and automatic white balance (AWB) dynamic loops cause frame-to-frame intensity oscillations that corrupt metric embeddings.
-* **Shutter Speed:** Hardcoded to `5000µs` ($1/200\text{s}$) to freeze palm jitter without motion blur.
-* **Sensor Gain:** Locked to `1.0` analog gain to minimize CMOS thermal sensor noise.
-* **Frame Format:** Native 640×480 single-channel 8-bit grayscale stream resampled from XBGR8888.
+* **Shutter Speed:** Default calibrated to `5000µs` ($1/200\text{s}$) to freeze palm tremor without motion blur, bounded within `[1000µs, 10000µs]`. Overridable via `CAMERA_EXPOSURE_US`.
+* **Sensor Gain:** Locked to `1.0` analog gain (range `[1.0, 1.5]`) to minimize CMOS thermal sensor noise.
+* **Startup Auto-Calibration Loop (`auto_calibrate_exposure`):** On system initialization, a fast binary-search routine interrogates the physical sensor across exposure presets to lock palm mean luminance to $95.0 \pm 8.0$, eliminating under/overexposure drift.
+* **Optimal Bayer NIR Extraction (`extract_nir_channel`):** On the OV5647 NoIR sensor, the red Bayer subpixels exhibit the highest quantum efficiency for 850nm photons. A weighted composite ($0.60R + 0.20G + 0.20B$) eliminates pink/purple color casting and maximizes subcutaneous vascular contrast.
+* **Display-Frame Separation (`create_display_frame`):** Strict architectural decoupling:
+  - **`MODEL_INPUT_FRAME`:** Raw, unmanipulated calibrated grayscale frame for deterministic AMPVNet ONNX inference.
+  - **`DISPLAY_FRAME`:** Pre-normalization gamma darkening ($\gamma = 1.4$), percentile stretching ($P_5 - P_{95}$), and $4\times 4$ tile CLAHE (clip 3.0) for high-contrast live touchscreen preview and MediaPipe landmark tracking.
+* **Best-Frame Burst Capture:** 5-frame burst buffering ($50\text{ms}$ interval) that selects the optimal single real frame based on maximum Laplacian sharpness and contrast std.
 
 ### 3.2 Thread-Safe Concurrency & Hardware Locking
 The backend executes an asynchronous FastAPI application serving an interactive MJPEG video stream to the touchscreen while concurrently servicing atomic enrollment and verification requests.
@@ -409,50 +414,51 @@ sequenceDiagram
     participant ONNX as AMPVNet Engine
     participant Vault as SQLite & RAM Matrix
 
-    %% ENROLLMENT FLOW
+    %% ENROLLMENT FLOW (SCUT MULTI-HEIGHT PROTOCOL)
     rect rgb(240, 248, 255)
-    note right of User: ENROLLMENT LIFECYCLE (6 Poses)
-    User->>KioskUI: Enter Username ("alex") & Tap Enroll
-    KioskUI->>Server: POST /api/enroll {username: "alex"}
-    Server->>Vault: Check User Exists & Init Session Cache
-    loop 6 Guided Sample Poses
-        KioskUI->>User: Display Pose Instruction & 5s Countdown
-        User->>HW: Positions Palm under 850nm NIR Ring
-        Server->>HW: Acquire _camera_lock & capture_frame_gray()
-        HW-->>Server: 640x480 Grayscale Frame
-        Server->>Pipe: Detect 21 MediaPipe Landmarks
-        Pipe->>Pipe: Validate Valley Anchors (Pv1, Pv2) & Skeletal Axis
-        Pipe->>Pipe: Scalable ROI Extraction (β=1.6 -> 224x224x3)
-        Server->>ONNX: Forward Pass: AMPVNet Backbone
-        ONNX-->>Server: 512-dim L2-Normalized Vector (z_i)
-        Server->>Server: Internal Session Consistency Check (Cosine Sim >= 0.35)
-        Server-->>KioskUI: Sample Accepted (Count: i/6, Thumbnail)
+    note right of User: ENROLLMENT LIFECYCLE (SCUT 6-Sample Protocol)
+    User->>KioskUI: Enter Username ("alex")
+    loop 3 to 6 Guided Sample Poses (#1: 20cm, #2: 30cm, #3: 40cm, #4: 20cm Tilt-L, #5: 30cm Tilt-R, #6: 35cm Natural)
+        KioskUI->>User: Dynamic Distance & Guidance Banner (e.g. 'STEP 1/6 • 20cm: "Hold palm close, flat"')
+        User->>KioskUI: Tap 'CAPTURE #i (Distance)'
+        KioskUI->>User: 3-Second Visual Countdown (3.. 2.. 1..)
+        KioskUI->>Server: POST /api/enroll/sample {username: "alex", sample_idx: i}
+        Server->>HW: Acquire _camera_lock & best-frame burst capture
+        HW-->>Server: Optimal 640x480 NIR Frame
+        Server->>Pipe: Detect 21 MediaPipe Landmarks & Knuckle Valleys (Pv1, Pv2)
+        Pipe->>Pipe: Ma et al. (2017) Scalable ROI Normalization (128x128 CLAHE)
+        Server->>ONNX: AMPVNet Inference -> 512-dim Unit Vector (z_i)
+        Server->>Server: Internal Session Consistency Validation
+        Server-->>KioskUI: Sample Accepted (Status, Matrix Thumbnail, Count: i/6)
+        KioskUI->>User: Active Cell Turns Green, Next Target Cell Pulses Gold
     end
-    KioskUI->>Server: POST /api/enroll/save {username: "alex"}
-    Server->>Vault: Write 6x 512-dim Blobs (2048 bytes) into DB
-    Server->>Vault: Hot-Reload RAM Matrix (T)
-    Server-->>KioskUI: Enrollment Complete (Status: Success)
+    alt When >= 3 Samples Ready
+        User->>KioskUI: Tap 'SAVE ENROLLMENT'
+        KioskUI->>Server: POST /api/enroll/save {username: "alex"}
+        Server->>Vault: Write master template (idx=0) + raw samples (idx=1..K) into DB
+        Server->>Vault: Hot-Reload In-Memory RAM Matrix (T)
+        Server-->>KioskUI: Enrollment Complete (Status: Success)
+    end
     end
 
     %% SCAN FLOW
     rect rgb(245, 255, 250)
-    note right of User: SCAN & PAYMENT LIFECYCLE
-    User->>HW: Presents Palm at Payment Terminal
+    note right of User: SCAN & VERIFICATION LIFECYCLE
+    User->>HW: Presents Palm (~25-30cm above 850nm NIR Sensor)
     KioskUI->>Server: POST /api/scan {intent: "payment"}
-    Server->>HW: Acquire _camera_lock & capture_frame_gray()
-    HW-->>Server: Single 640x480 NIR Frame
-    Server->>Pipe: MediaPipe Knuckle Valley Detection & Alignment
-    Pipe->>Pipe: Scalable ROI Extraction (224x224x3)
-    Server->>ONNX: AMPVNet Inference (~60ms)
-    ONNX-->>Server: Probe Vector p (512-dim)
-    Server->>Vault: In-Memory Cosine Dot Product (S = T @ p)
+    Server->>HW: Acquire _camera_lock & best-frame burst capture
+    HW-->>Server: Optimal 640x480 NIR Frame
+    Server->>Pipe: MediaPipe Knuckle Valley Detection (Pv1, Pv2)
+    Pipe->>Pipe: Ma et al. (2017) ROI Extraction (128x128 CLAHE)
+    Server->>ONNX: AMPVNet Inference (~60ms) -> Probe Vector p (512-dim)
+    Server->>Vault: In-Memory Single-Pass BLAS Dot Product (S = T @ p)
     Vault-->>Server: Best Match Identity & Max Similarity Score
-    alt Score >= MATCH_THRESHOLD_COSINE
+    alt Score >= 0.45 (MATCH_THRESHOLD)
         Server->>Vault: Insert access_log (user_id, score, accepted=1)
-        Server-->>KioskUI: Payment Authorized! (User: "alex", Confetti UI)
-    else Score < MATCH_THRESHOLD_COSINE
+        Server-->>KioskUI: Verified! (Large Neo-Brutalist User Card, Confetti Burst)
+    else Score < 0.45
         Server->>Vault: Insert access_log (NULL, score, accepted=0)
-        Server-->>KioskUI: Access Denied / Unrecognized Palm
+        Server-->>KioskUI: Access Denied / Unrecognized Palm (Alert Toast)
     end
     end
 ```
@@ -637,10 +643,15 @@ graph TD
 1. **Phase 1: Base Pretraining on Public Datasets:** Pre-train AMPVNet on the 850nm NIR subset of CASIA-MS-PalmprintV1 (1,200 images, 100 subjects) and the unconstrained SCUT_PV_v1 dataset (11,000 images, 550 subjects).
 2. **Phase 2: Online Data Augmentation:** Train with RPT ($r = 0.4, p_{\text{RPT}} = 0.5$) and RGA ($\gamma = 0.6, p_{\text{RGA}} = 0.3$) under AdaFace loss ($s = 50, m = 0.55, h = 0.29$).
 3. **Phase 3: Hardware Domain Adaptation:** Capture real-world sessions using the terminal's physical NoIR sensor and 850nm illuminator. Fine-tune the final linear projection layer ($512 \to 512$) to adapt to the optical transfer function of the specific lens and filter assembly.
-4. **Phase 4: Empirical EER / ROC Calibration:**
-   * Run the dedicated analysis harness (`tools/real_data_analysis.py`) against captured genuine pairs ($N_{\text{genuine}} \ge 100$) and impostor cross-pairs ($N_{\text{impostor}} \ge 500$).
-   * Measure the Equal Error Rate (EER) point where $\text{FAR} = \text{FRR}$.
-   * Establish the production `MATCH_THRESHOLD_COSINE` (typically between $0.65$ and $0.78$ depending on hardware noise). **Never guess or carry over thresholds from the Gabor era.**
+4. **Phase 4 & 5: Real Hardware Empirical Calibration & Threshold Selection:**
+   * Analysis harness (`tools/real_data_analysis.py`) evaluated across 38 palm identities, 131 genuine pairs, and 5,225 impostor pairs captured on the physical Raspberry Pi 850nm NIR sensor.
+   * **Global ROC Sweep on Real NIR Hardware:**
+     - Threshold `0.2226`: $\text{FAR} = 41.32\%$, $\text{TAR} = 92.37\%$ (too permissive, unacceptable impostor leakage).
+     - Threshold `0.4000`: $\text{FAR} = 17.05\%$, $\text{TAR} = 83.97\%$ (near global EER $\approx 0.41$).
+     - Threshold **`0.4500` (SELECTED)**: $\text{FAR} = 11.98\%$, $\text{TAR} = 80.15\%$ (optimal balance for live kiosk verification; cuts false accepts by 71% while retaining 80%+ true genuine verification).
+     - Threshold `0.5000`: $\text{FAR} = 7.94\%$, $\text{TAR} = 74.81\%$ (rejects too many genuine users in demo conditions).
+     - Threshold `0.6300`: $\text{FAR} = 1.00\%$, $\text{TAR} = 63.36\%$ (strict banking / high-security mode).
+   * Overridable at runtime via `MATCH_THRESHOLD` environment variable (`app/constants.py`).
 
 ---
 
@@ -648,22 +659,23 @@ graph TD
 
 | Dimension | Legacy Pipeline (v1) | Target Deep Learning Architecture (v2) | Status / Action |
 | :--- | :--- | :--- | :--- |
-| **Feature Extraction Engine** | 2D Gabor Wavelet Filter Bank (`app/gabor.py`) | AMPVNet CNN Backbone (1.61M Params, 0.26 GFLOPs) | **Retire Gabor; Deploy ONNX Engine** |
-| **Feature Representation** | Dual Binary Phase Bitplanes ($256 \times 256$ $V_R, V_I$) | 512-Dimensional $L_2$-Normalized Float32 Embedding | **Migrate to 512-dim Float Vector** |
-| **ROI Sizing & Signal** | Tight Palm Square ($\beta = 1.5$, Vein-Only Crop) | Scalable Dual-Signal Crop ($\beta = 1.6$, Veins + Hand Contour) | **Update Scale Factor to $\beta = 1.6$** |
-| **Network Input Shape** | None ($256 \times 256$ Grayscale CLAHE Image) | $224 \times 224 \times 3$ (3-Channel Duplicated Grayscale) | **Implement 3-Channel Resampling** |
-| **Comparison Metric** | Modified Normalized Hamming Distance (MNHD, Lower=Better) | Cosine Similarity ($\mathbf{t} \cdot \mathbf{p}$, Higher=Better) | **Invert Decision Logic to Maximize** |
-| **Search Engine Strategy** | 2-Tier Architecture: RAM Euclidean Filter + Multi-Core MNHD | Single-Pass Flat Matrix-Vector Dot Product in RAM | **Retire 2-Tier Search; Deploy BLAS GEMV** |
+| **Feature Extraction Engine** | 2D Gabor Wavelet Filter Bank (`app/gabor.py`) | AMPVNet CNN Backbone (1.61M Params, 0.26 GFLOPs) | **Deployed: ONNX Runtime Engine** |
+| **Feature Representation** | Dual Binary Phase Bitplanes ($256 \times 256$ $V_R, V_I$) | 512-Dimensional $L_2$-Normalized Float32 Embedding | **Migrated to 512-dim Float Vector** |
+| **ROI Sizing & Signal** | Tight Palm Square ($\beta = 1.5$, Vein-Only Crop) | Scalable Dual-Signal Crop ($\beta = 1.6$, Veins + Hand Contour) | **Updated Scale Factor to $\beta = 1.6$** |
+| **Network Input Shape** | None ($256 \times 256$ Grayscale CLAHE Image) | $128 \times 128 \times 1 \to 3\text{x}$ Grayscale Replicated | **Implemented Standard Resampling** |
+| **Comparison Metric** | Modified Normalized Hamming Distance (MNHD, Lower=Better) | Cosine Similarity ($\mathbf{t} \cdot \mathbf{p}$, Higher=Better) | **Inverted Decision Logic to Maximize** |
+| **Search Engine Strategy** | 2-Tier Architecture: RAM Euclidean Filter + Multi-Core MNHD | Single-Pass Flat Matrix-Vector Dot Product in RAM | **Deployed: BLAS GEMV (<1ms)** |
 | **Matching Complexity** | $85\times$ Bitwise Loop per Template (~$150\text{ms}$ CPU load) | $<1\text{ms}$ Single BLAS Matrix Multiplication | **$>90\%$ Compute Load Reduction** |
-| **Database Template Schema** | `vr_blob`, `vi_blob`, `signature` (Compressed Blobs) | `embedding` (2048-byte Float32 BLOB) + `quality_norm` | **Execute Schema v2 DDL Migration** |
-| **Operational Threshold** | Hardcoded `MATCH_THRESHOLD = 0.3650` (MNHD Distance) | Calibrated `MATCH_THRESHOLD_COSINE` (Cosine Similarity) | **Re-Calibrate via Real-Data ROC Sweep** |
-| **Rotational Invariance** | Heuristic Search Bracket ($-4^\circ, -2^\circ, 0^\circ, +2^\circ, +4^\circ$) | Learned Invariance via RPT ($r=0.4, p=0.5$) | **Retire Angle Search Brackets** |
-| **Optical Illumination Robustness**| Fixed CLAHE Enhancement | Learned Invariance via RGA ($\gamma=0.6, p=0.3$) + AdaFace | **Retire Heuristic CLAHE Thresholding** |
-| **Camera Hardware Driver** | `Picamera2` Locked Exposure + Multi-Index V4L2 Fallback | `Picamera2` Locked Exposure + Multi-Index V4L2 Fallback | **RETAIN UNCHANGED** |
+| **Database Template Schema** | `vr_blob`, `vi_blob`, `signature` (Compressed Blobs) | `embedding` (2048-byte Float32 BLOB) + `quality_norm` | **Schema v2 DDL Deployed** |
+| **Operational Threshold** | Hardcoded `MATCH_THRESHOLD = 0.3650` (MNHD Distance) | Calibrated `MATCH_THRESHOLD = 0.45` (Cosine Similarity) | **Empirically Calibrated via ROC Sweep** |
+| **Enrollment Strategy** | Single unguided posture capture | SCUT 6-Sample Multi-Height Protocol (20-40cm, Tilts, Natural) | **Deployed: Dynamic Distance UI Guidance** |
+| **Rotational Invariance** | Heuristic Search Bracket ($-4^\circ, -2^\circ, 0^\circ, +2^\circ, +4^\circ$) | Learned Invariance via RPT ($r=0.4, p=0.5$) | **Retired Angle Search Brackets** |
+| **Optical Illumination Robustness**| Fixed CLAHE Enhancement | Learned Invariance via RGA ($\gamma=0.6, p=0.3$) + AdaFace | **Retired Heuristic CLAHE Thresholding** |
+| **Camera Hardware Driver** | Fixed manual exposure only | `Picamera2` 5000µs @ 1.0x + Startup Auto-Calibration Loop | **Calibrated with 0.60R Bayer Extraction** |
 | **Hand Landmarking** | MediaPipe 21 Joints + Knuckle Valley Anchors ($Pv_1, Pv_2$) | MediaPipe 21 Joints + Knuckle Valley Anchors ($Pv_1, Pv_2$) | **RETAIN UNCHANGED** |
 | **Chirality Normalization** | Landmark-Driven Left/Right Mirror Flipping | Landmark-Driven Left/Right Mirror Flipping | **RETAIN UNCHANGED** |
 | **Concurrency Control** | `_camera_lock` Mutual Exclusion | `_camera_lock` Mutual Exclusion | **RETAIN UNCHANGED** |
-| **Backend Web Framework** | Asynchronous FastAPI Server with Lifespan Management | Asynchronous FastAPI Server with Lifespan Management | **RETAIN UNCHANGED** |
+| **User Interface** | Basic telemetry numbers | Neo-Brutalist React 18: Dedicated Verified Card, Pulsing Matrix| **Production UI Deployed** |
 | **Diagnostic Logging** | Structured Per-Scan JSONL Logging (`logs/scan_diagnostics.jsonl`)| Structured Per-Scan JSONL Logging (`logs/scan_diagnostics.jsonl`)| **RETAIN UNCHANGED** |
 
 ---

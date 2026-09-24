@@ -60,3 +60,7 @@ web/dist/
 
 # ── Binary Research Documents ─────────────────────────────────────────────────
 *.pdf
+
+# ── Local Documentation & Reports (Kept locally, excluded from GitHub) ───────
+agent_report.md
+docs/
