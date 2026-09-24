@@ -710,15 +710,15 @@ export default function App() {
               - Two clear, big action buttons with text inside
              ══════════════════════════════════════════════════════════════════════ */}
           {appState === 'idle' && (
-            <div className="flex-1 flex flex-col items-center justify-between p-6 animate-fadeIn relative overflow-y-auto select-none w-full max-w-[800px] mx-auto">
+            <div className="flex-1 flex flex-col items-center justify-between p-4 sm:p-6 animate-fadeIn relative overflow-y-auto select-none w-full max-w-[800px] mx-auto">
               
-              {/* Nexus Lab Brand Logo — centered in the middle instead of terminal ready */}
-              <div className="w-full flex justify-center items-center z-10 pt-1 pb-1">
+              {/* Nexus Lab Brand Logo — prominent size to fill vertical space cleanly */}
+              <div className="w-full flex justify-center items-center z-10 pt-2 pb-1">
                 <img 
                   src="/ntllogo.png" 
                   alt="Nexus Lab Logo" 
                   title="Nexus Lab"
-                  className="h-11 sm:h-12 w-auto object-contain select-none filter drop-shadow-[0_2px_4px_rgba(0,0,0,0.12)] hover:scale-105 transition-transform" 
+                  className="h-20 sm:h-24 w-auto object-contain select-none filter drop-shadow-[0_4px_10px_rgba(0,0,0,0.15)] hover:scale-105 transition-transform" 
                 />
               </div>
 
