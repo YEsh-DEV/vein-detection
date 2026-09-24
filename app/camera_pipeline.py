@@ -46,64 +46,36 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # 1. Configurable NIR Channel Extraction
 # ---------------------------------------------------------------------------
-def extract_nir_channel(frame: np.ndarray, method: Optional[str] = None) -> np.ndarray:
+def extract_nir_channel(bgr_frame: np.ndarray, method: str = None) -> np.ndarray:
     """
-    Extracts calibrated NIR grayscale representation from a camera frame.
-
-    Physical Rationale (OV5647 NoIR with 850nm NIR illumination):
-    - Silicon has peak NIR quantum efficiency around 800-850nm.
-    - The Red Bayer microfilter has ~85-90% transmittance at 850nm.
-    - Blue has ~75% transmittance.
-    - Green has lower transmittance (~55-65%).
-    - Standard OpenCV COLOR_BGR2GRAY applies Rec.601 weights: 0.299*R + 0.587*G + 0.114*B,
-      which gives 58.7% weight to the Green channel (the lowest NIR transmission site).
-    - Calibrated NIR weighting (0.50*R + 0.25*G + 0.25*B) maximizes 850nm signal-to-noise ratio
-      while integrating all physical photodiode sites without Bayer mosaic patterning.
-
-    Supported methods:
-      - 'weighted_nir': 0.50*R + 0.25*G + 0.25*B (default)
-      - 'r_channel': Pure Red channel
-      - 'g_channel': Pure Green channel
-      - 'b_channel': Pure Blue channel
-      - 'rec601_gray': Standard Rec.601 (0.299*R + 0.587*G + 0.114*B)
-      - 'equal_nir': Equal weighting ((R + G + B) / 3.0)
+    Extract NIR channel with higher Red weight for 850nm OV5647.
+    Red Bayer pixels have highest 850nm transmittance on NoIR sensor.
     """
-    if frame is None:
+    if bgr_frame is None:
         raise ValueError("Input frame is None")
+    if bgr_frame.ndim == 2:
+        return bgr_frame
 
-    if frame.ndim == 2:
-        return frame
+    b = bgr_frame[:, :, 0].astype(np.float32)
+    g = bgr_frame[:, :, 1].astype(np.float32)
+    r = bgr_frame[:, :, 2].astype(np.float32)
 
-    mode = (method or NIR_EXTRACTION_METHOD).lower()
+    if method:
+        mode = method.lower()
+        if mode == "r_channel":
+            return np.clip(r, 0, 255).astype(np.uint8)
+        elif mode == "g_channel":
+            return np.clip(g, 0, 255).astype(np.uint8)
+        elif mode == "b_channel":
+            return np.clip(b, 0, 255).astype(np.uint8)
+        elif mode in ("rec601_gray", "grayscale"):
+            return np.clip(0.299 * r + 0.587 * g + 0.114 * b, 0, 255).astype(np.uint8)
+        elif mode in ("equal_nir", "equal_weighted"):
+            return np.clip((r + g + b) / 3.0, 0, 255).astype(np.uint8)
 
-    # 4-channel image (e.g. XBGR8888 or BGRA from Picamera2/V4L2)
-    if frame.shape[2] == 4:
-        b = frame[:, :, 0].astype(np.float32)
-        g = frame[:, :, 1].astype(np.float32)
-        r = frame[:, :, 2].astype(np.float32)
-    elif frame.shape[2] == 3:
-        # Standard BGR
-        b = frame[:, :, 0].astype(np.float32)
-        g = frame[:, :, 1].astype(np.float32)
-        r = frame[:, :, 2].astype(np.float32)
-    elif frame.shape[2] == 1:
-        return frame.squeeze(-1)
-    else:
-        raise ValueError(f"Unsupported frame channels: {frame.shape[2]}")
-
-    if mode == "r_channel":
-        return r.clip(0, 255).astype(np.uint8)
-    elif mode == "g_channel":
-        return g.clip(0, 255).astype(np.uint8)
-    elif mode == "b_channel":
-        return b.clip(0, 255).astype(np.uint8)
-    elif mode in ("rec601_gray", "grayscale"):
-        return (0.299 * r + 0.587 * g + 0.114 * b).clip(0, 255).astype(np.uint8)
-    elif mode in ("equal_nir", "equal_weighted"):
-        return ((r + g + b) / 3.0).clip(0, 255).astype(np.uint8)
-    else:
-        # Default: weighted_nir (0.50*R + 0.25*G + 0.25*B)
-        return (0.50 * r + 0.25 * g + 0.25 * b).clip(0, 255).astype(np.uint8)
+    # 0.60R + 0.20G + 0.20B — maximizes 850nm NIR signal
+    nir = 0.60 * r + 0.20 * g + 0.20 * b
+    return np.clip(nir, 0, 255).astype(np.uint8)
 
 
 # ---------------------------------------------------------------------------
@@ -173,55 +145,65 @@ def auto_calibrate_exposure(picam2, target_mean=115.0,
     return best_exp, best_gain
 
 
-def create_display_frame(raw_bgr: np.ndarray, method: Optional[str] = None) -> np.ndarray:
+def create_display_frame(raw_bgr: np.ndarray) -> np.ndarray:
     """
-    Display pipeline for overexposed 850nm LED NIR setup.
-    Pure percentile normalization + CLAHE. No homomorphic division.
+    Final calibrated display pipeline for OV5647 NoIR + 850nm LEDs.
+    
+    Strategy from research paper (SCUT_PV_v1):
+    - Veins are DARK structures against BRIGHT subcutaneous tissue
+    - Need local contrast enhancement (CLAHE) to reveal dark vein valleys
+    - Gamma correction darkens bright palm center without losing vein detail
+    - Small tile CLAHE (4x4) enhances local vein-tissue contrast
     """
     if raw_bgr is None:
         return None
 
-    if raw_bgr.ndim == 2:
-        nir = raw_bgr.astype(np.float32)
-    else:
-        b = raw_bgr[:, :, 0].astype(np.float32)
-        g = raw_bgr[:, :, 1].astype(np.float32)
-        r = raw_bgr[:, :, 2].astype(np.float32)
-        nir = 0.50 * r + 0.25 * g + 0.25 * b
+    # Step 1: NIR channel extraction
+    nir = extract_nir_channel(raw_bgr).astype(np.float32)
 
-    lo = np.percentile(nir, DISPLAY_PERCENTILE_LOW)
-    hi = np.percentile(nir, DISPLAY_PERCENTILE_HIGH)
-    if hi - lo < 15:
-        hi = lo + 15
-    nir_norm = np.clip(
-        (nir - lo) / (hi - lo) * 255.0, 0, 255
+    # Step 2: Gamma correction — darkens overexposed palm center
+    # Gamma > 1.0 darkens bright regions, reveals vein valleys
+    # Applied BEFORE percentile normalization
+    nir_norm_pre = nir / 255.0
+    gamma = 1.4   # darkens bright palm without crushing dark veins
+    nir_gamma = np.power(np.clip(nir_norm_pre, 1e-6, 1.0), gamma)
+    nir_gamma = (nir_gamma * 255.0).astype(np.uint8)
+
+    # Step 3: Percentile normalization on gamma-corrected image
+    lo = np.percentile(nir_gamma, DISPLAY_PERCENTILE_LOW)    # 5.0
+    hi = np.percentile(nir_gamma, DISPLAY_PERCENTILE_HIGH)   # 95.0
+    if hi - lo < 20:
+        hi = lo + 20
+    nir_stretched = np.clip(
+        (nir_gamma.astype(np.float32) - lo) / (hi - lo) * 255.0,
+        0, 255
     ).astype(np.uint8)
 
+    # Step 4: CLAHE with small tile grid (4x4) for local vein contrast
+    # Small tiles = enhances contrast at the vein scale (~5-15px wide)
+    # High clip (3.0) = aggressive enough to reveal subtle vein valleys
     clahe = cv2.createCLAHE(
-        clipLimit=DISPLAY_CLAHE_CLIP,
-        tileGridSize=DISPLAY_CLAHE_GRID
+        clipLimit=DISPLAY_CLAHE_CLIP,      # 3.0
+        tileGridSize=DISPLAY_CLAHE_GRID    # (4, 4)
     )
-    enhanced = clahe.apply(nir_norm)
+    enhanced = clahe.apply(nir_stretched)
+
+    # Step 5: Mild denoise — removes sensor noise without blurring veins
     enhanced = cv2.GaussianBlur(enhanced, (3, 3), 0)
 
+    # Step 6: Convert to BGR and add guide overlay
     display = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
     h, w = display.shape[:2]
-    bx1, by1 = int(w * 0.15), int(h * 0.05)
-    bx2, by2 = int(w * 0.85), int(h * 0.95)
-    corner_len = min(22, max(5, int(w * 0.1)))
-    col, thick = (0, 220, 0), 2
+    bx1, by1 = int(w * 0.12), int(h * 0.05)
+    bx2, by2 = int(w * 0.88), int(h * 0.92)
+    corner_len, col, thick = 20, (0, 220, 0), 2
     for cx, cy in [(bx1, by1), (bx2, by1), (bx1, by2), (bx2, by2)]:
         dx = corner_len if cx == bx1 else -corner_len
         dy = corner_len if cy == by1 else -corner_len
         cv2.line(display, (cx, cy), (cx + dx, cy), col, thick)
         cv2.line(display, (cx, cy), (cx, cy + dy), col, thick)
-    ty = (by1 - 8) if by1 >= 12 else (by1 + 15)
-    cv2.putText(
-        display,
-        "Place palm here | 10-14cm",
-        (bx1, ty),
-        cv2.FONT_HERSHEY_SIMPLEX, 0.45, col, 1
-    )
+    cv2.putText(display, "Place palm here | 10-14cm",
+                (bx1, by1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, col, 1)
     return display
 
 

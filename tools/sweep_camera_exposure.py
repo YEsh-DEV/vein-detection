@@ -53,15 +53,13 @@ from app.camera_pipeline import (
 )
 
 SWEEP_PRESETS = [
-    (1000, 1.0),
     (2000, 1.0),
     (3000, 1.0),
     (4000, 1.0),
     (5000, 1.0),
     (6000, 1.0),
+    (7000, 1.0),
     (8000, 1.0),
-    (10000, 1.0),
-    (12000, 1.0),
 ]
 
 
@@ -86,7 +84,7 @@ def simulate_candidate_frame(base_frame: np.ndarray, exp_us: int, gain: float) -
     Simulates optical response under scaled exposure and gain for laptop testing.
     Includes sensor scaling, non-linear saturation, and Poisson-like noise.
     """
-    scale = (exp_us / 6000.0) * (gain / 1.0)
+    scale = (exp_us / 5000.0) * (gain / 1.0)
     sim = base_frame.astype(np.float32) * scale
     # Add mild noise proportional to gain
     noise = np.random.normal(0, gain * 1.5, sim.shape)
@@ -192,7 +190,7 @@ def run_exposure_sweep(args):
                 "sharpness": sharpness,
                 "score": round(score, 2),
                 "verdict": verdict,
-                "is_candidate": bool(exp_us == 6000 and gain == 1.0),
+                "is_candidate": bool(exp_us == 5000 and gain == 1.0),
             }
             sweep_results.append(item)
 
@@ -214,7 +212,7 @@ def run_exposure_sweep(args):
             picam2.stop()
 
     print("=" * 95)
-    print("  [*] Current candidate setting: 6,000 µs @ Gain 1.0\n")
+    print("  [*] Current candidate setting: 5,000 µs @ Gain 1.0\n")
 
     summary = {
         "hardware_source": "REAL_PICAMERA2" if is_real_pi else ("IMAGE_SIMULATION" if args.image else "SYNTHETIC_SIMULATION"),

@@ -26,6 +26,9 @@ from app.constants import (
     GAIN_SEARCH_BOUNDS,
     TARGET_PALM_MEAN_MIN,
     TARGET_PALM_MEAN_MAX,
+    NIR_WEIGHT_RED,
+    NIR_WEIGHT_GREEN,
+    NIR_WEIGHT_BLUE,
 )
 from app.camera_pipeline import (
     extract_nir_channel,
@@ -47,9 +50,13 @@ class TestCameraPipeline(unittest.TestCase):
     def test_01_optimal_nir_channel_extraction(self):
         """
         Validates that extract_nir_channel correctly extracts NIR-weighted luminance
-        (0.50*R + 0.25*G + 0.25*B) from 3-channel and 4-channel arrays,
+        (0.60*R + 0.20*G + 0.20*B) from 3-channel and 4-channel arrays,
         giving higher weight to the NIR-transmissive Red channel.
         """
+        self.assertEqual(NIR_WEIGHT_RED, 0.60)
+        self.assertEqual(NIR_WEIGHT_GREEN, 0.20)
+        self.assertEqual(NIR_WEIGHT_BLUE, 0.20)
+
         # Test 1: Grayscale 2D array passes through unchanged
         gray_in = np.full((100, 100), 120, dtype=np.uint8)
         gray_out = extract_nir_channel(gray_in)
@@ -63,9 +70,9 @@ class TestCameraPipeline(unittest.TestCase):
         bgr[:, :, 2] = 200  # Red
         nir_out = extract_nir_channel(bgr)
 
-        # Expected: 0.50*200 + 0.25*50 + 0.25*50 = 100 + 12.5 + 12.5 = 125
+        # Expected: 0.60*200 + 0.20*50 + 0.20*50 = 120 + 10 + 10 = 140
         self.assertEqual(nir_out.shape, (100, 100))
-        self.assertAlmostEqual(float(nir_out.mean()), 125.0, delta=1.0)
+        self.assertAlmostEqual(float(nir_out.mean()), 140.0, delta=1.0)
 
         # Compare with OpenCV standard BGR2GRAY: 0.299*200 + 0.587*50 + 0.114*50 = 59.8 + 29.35 + 5.7 = 94.85
         std_gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
@@ -105,20 +112,20 @@ class TestCameraPipeline(unittest.TestCase):
             current_mean=185.0,
             current_sat_pct=8.5,
             current_exposure_us=7000,
-            current_gain=1.8,
+            current_gain=1.5,
         )
         self.assertLess(new_exp, 7000, "Exposure must decrease when saturated")
         self.assertGreaterEqual(new_exp, exp_min)
-        self.assertLessEqual(new_gain, 1.8)
+        self.assertLessEqual(new_gain, 1.5)
 
         # Scenario C: Optimal frame: mean=115, sat=0.5%
         new_exp, new_gain = calculate_calibrated_exposure_and_gain(
             current_mean=115.0,
             current_sat_pct=0.5,
-            current_exposure_us=2500,
+            current_exposure_us=5000,
             current_gain=1.0,
         )
-        self.assertEqual(new_exp, 2500, "Optimal exposure should remain stable")
+        self.assertEqual(new_exp, 5000, "Optimal exposure should remain stable")
         self.assertEqual(new_gain, 1.0, "Optimal gain should remain stable")
 
     def test_03_display_enhancement_removes_purple_and_separates_from_model(self):

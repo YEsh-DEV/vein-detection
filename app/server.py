@@ -165,7 +165,7 @@ def init_hardware_camera():
                 "AeEnable":     False,
                 "AwbEnable":    False,
                 "ColourGains":  (1.0, 1.0),
-                "ExposureTime": 2500,
+                "ExposureTime": 5000,
                 "AnalogueGain": 1.0,
             })
         except Exception as ctrl_err:
@@ -183,13 +183,13 @@ def init_hardware_camera():
         try:
             best_exp, best_gain = auto_calibrate_exposure(
                 p,
-                target_mean=85.0,
-                min_exp=500,
-                max_exp=6000,
+                target_mean=95.0,
+                min_exp=2000,
+                max_exp=8000,
                 min_gain=1.0,
                 max_gain=1.0,
                 max_iterations=14,
-                tolerance=6.0,
+                tolerance=8.0,
             )
             p.set_controls({
                 "ExposureTime": best_exp,
@@ -197,7 +197,7 @@ def init_hardware_camera():
             })
             print(f"[Camera] Auto-calibrated: {best_exp}µs @ gain {best_gain:.1f}")
         except Exception as cal_err:
-            print(f"[!] Warning: Auto-calibration failed ({cal_err}), using 2500µs @ gain 1.0")
+            print(f"[!] Warning: Auto-calibration failed ({cal_err}), using 5000µs @ gain 1.0")
 
         picam2 = p
         CAMERA_AVAILABLE = True
