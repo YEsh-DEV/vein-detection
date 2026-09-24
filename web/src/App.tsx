@@ -1163,28 +1163,46 @@ export default function App() {
             <div className={`absolute inset-0 z-50 p-6 flex flex-col items-center justify-center animate-fadeIn ${
               resultOverlay.accepted ? 'bg-[#CCFF00]' : 'bg-[#FF4081]'
             }`}>
-              <div className="w-full max-w-[460px] bg-[#FFFDF0] border-[4px] border-black rounded-3xl p-6 shadow-[8px_8px_0px_#121212] text-center space-y-4 neo-card">
+              <div className="w-full max-w-[460px] bg-[#FFFDF0] border-[4px] border-black rounded-3xl p-5 sm:p-6 shadow-[8px_8px_0px_#121212] text-center space-y-3 sm:space-y-3.5 neo-card overflow-y-auto max-h-[96vh]">
                
                 {/* Status Icon */}
-                <div className="relative mx-auto w-20 h-20">
-                  <div className={`w-20 h-20 rounded-2xl border-[3.5px] border-black shadow-[4px_4px_0px_#121212] flex items-center justify-center font-display font-black text-4xl animate-float ${
+                <div className="relative mx-auto w-16 h-16 sm:w-20 sm:h-20">
+                  <div className={`w-16 h-16 sm:w-20 sm:h-20 rounded-2xl border-[3.5px] border-black shadow-[4px_4px_0px_#121212] flex items-center justify-center font-display font-black text-3xl sm:text-4xl animate-float ${
                     resultOverlay.accepted ? 'bg-[#CCFF00] text-black' : 'bg-[#FF4081] text-white'
                   }`}>
                     {resultOverlay.accepted ? '✓' : '✕'}
                   </div>
                 </div>
 
-                {/* Headline & Identity */}
-                <div className="space-y-1">
+                {/* Headline */}
+                <div className="space-y-0.5">
                   <h3 className="font-display font-black text-2xl tracking-tight uppercase leading-tight">
                     {resultOverlay.accepted ? 'PALM VERIFIED' : 'NOT RECOGNIZED'}
                   </h3>
-                  <p className="font-bold text-xs text-[#555]">
-                    {resultOverlay.accepted 
-                      ? `Welcome, ${resultOverlay.username?.toUpperCase()}! Identity confirmed.` 
-                      : 'Vein pattern not recognized. Reposition palm and try again.'}
-                  </p>
+                  {!resultOverlay.accepted && (
+                    <p className="font-bold text-xs text-[#555]">
+                      Vein pattern not recognized. Reposition palm and try again.
+                    </p>
+                  )}
                 </div>
+
+                {/* User Identity Box (Prominent Box matching Results card) */}
+                {resultOverlay.accepted && (
+                  <div className="bg-white border-[2px] border-black rounded-2xl p-3 shadow-[2px_2px_0px_#121212] space-y-1 text-center">
+                    <div className="flex justify-between items-center text-xs font-black">
+                      <span className="text-[#666] uppercase">USER:</span>
+                      <span className="px-2 py-0.5 rounded border-[1.5px] border-black text-[10px] bg-[#CCFF00] text-black font-black">
+                        VERIFIED
+                      </span>
+                    </div>
+                    <div className="font-display font-black text-2xl sm:text-3xl text-black tracking-tight uppercase break-words leading-tight py-0.5">
+                      {resultOverlay.username?.toUpperCase()}
+                    </div>
+                    <div className="text-[10px] font-bold text-[#666]">
+                      Identity confirmed • Welcome back
+                    </div>
+                  </div>
+                )}
 
                 {/* Telemetry Card */}
                 <div className="bg-white border-[2px] border-black rounded-2xl p-3 shadow-[2px_2px_0px_#121212] space-y-1.5 text-left">
