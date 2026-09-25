@@ -36,6 +36,7 @@ try:
         CODE_ROI_EXTRACTION_FAILED,
         CODE_QUALITY_LOW_CONTRAST,
         CODE_QUALITY_EXCESSIVE_PADDING,
+        MIN_CONTRAST_STD,
     )
     from app.capture_errors import CaptureError
 except ImportError:
@@ -50,6 +51,7 @@ except ImportError:
         CODE_ROI_EXTRACTION_FAILED,
         CODE_QUALITY_LOW_CONTRAST,
         CODE_QUALITY_EXCESSIVE_PADDING,
+        MIN_CONTRAST_STD,
     )
     from capture_errors import CaptureError
 
@@ -125,7 +127,38 @@ def diagnose_hand_positioning(gray_img: np.ndarray) -> dict:
     right_touch = bool(np.count_nonzero(thresh[:, -margin:]) > 15)
     border_touches = sum([top_touch, bottom_touch, left_touch, right_touch])
 
-    if occupancy < 0.08 or mean_val < 20.0:
+    # Shape and blob coherence analysis on foreground
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    has_hand_shape = False
+    is_glare_or_empty_booth = False
+
+    if contours:
+        c = max(contours, key=cv2.contourArea)
+        c_area = float(cv2.contourArea(c))
+        bx, by, bw, bh = cv2.boundingRect(c)
+
+        # Center region occupancy (central 40% of frame where palm guide box is)
+        ch1, ch2 = int(h * 0.3), int(h * 0.7)
+        cw1, cw2 = int(w * 0.3), int(w * 0.7)
+        center_crop = thresh[ch1:ch2, cw1:cw2]
+        center_occ = float(np.count_nonzero(center_crop)) / float(center_crop.size) if center_crop.size > 0 else 0.0
+
+        coherent_blob = (c_area / float(hand_px)) >= 0.30 if hand_px > 0 else False
+        # Uniform full frame wash: spans full width & height, touches all 4 borders, fills nearly the entire frame (>85%)
+        is_full_frame_wash = (border_touches == 4 and occupancy > 0.85 and (bw >= w - 10 and bh >= h - 10))
+        # Empty booth: perimeter walls are bright, but central palm area is dark/empty
+        is_hollow_booth = (border_touches >= 3 and center_occ < 0.15)
+
+        aspect = float(bw) / float(bh) if bh > 0 else 0.0
+        valid_aspect = (0.20 <= aspect <= 5.0)
+
+        if is_full_frame_wash or is_hollow_booth:
+            is_glare_or_empty_booth = True
+            has_hand_shape = False
+        elif coherent_blob and valid_aspect and (center_occ >= 0.15 or c_area >= 0.15 * total_px):
+            has_hand_shape = True
+
+    if occupancy < 0.08 or mean_val < 20.0 or is_glare_or_empty_booth:
         reason = "HAND_OUTSIDE_FRAME"
         instruction = "No hand detected. Place palm flat ~10-15cm above camera."
     elif std_val < 14.0:
@@ -135,17 +168,19 @@ def diagnose_hand_positioning(gray_img: np.ndarray) -> dict:
         reason = "HAND_TOO_FAR"
         instruction = "Hand is too far — move closer to the camera sensor."
     elif (
-        # Case A: Extreme occupancy regardless of borders → genuinely too close (palm fills frame)
-        occupancy > 0.62
-        or
-        # Case B: Moderate-high occupancy WITH confirmed frame boundary clipping
-        # Requires 2+ border sides touched and occupancy > 0.42.
-        # This preserves detection for hands that are close AND clipped by the frame,
-        # while allowing spread fingers (which raise occupancy to 0.45–0.58) to pass.
-        (border_touches >= 2 and occupancy > 0.42)
+        # Case A: Extreme occupancy WITH confirmed hand-like shape
+        # Case B: Moderate-high occupancy WITH confirmed frame boundary clipping AND hand shape
+        has_hand_shape and (
+            occupancy > 0.62
+            or (border_touches >= 2 and occupancy > 0.42)
+        )
     ):
         reason = "HAND_TOO_CLOSE"
         instruction = "Hand is too close — move hand farther from lens (~10-15cm)."
+    elif not has_hand_shape and (occupancy > 0.42 or border_touches >= 2):
+        # High occupancy or border touches without coherent hand shape (glare, reflections)
+        reason = "HAND_OUTSIDE_FRAME"
+        instruction = "No hand detected — please place palm in the guide box."
     else:
         reason = "NORMAL"
         instruction = "Hand positioning appears normal."
@@ -161,7 +196,9 @@ def diagnose_hand_positioning(gray_img: np.ndarray) -> dict:
         "borders": {
             "top": top_touch, "bottom": bottom_touch,
             "left": left_touch, "right": right_touch
-        }
+        },
+        "has_hand_shape": has_hand_shape,
+        "is_glare_or_empty_booth": is_glare_or_empty_booth
     }
 
 
@@ -202,7 +239,10 @@ def detect_hand_landmarks_with_diagnostics(gray_img: np.ndarray, landmarker) -> 
 
     if not result.hand_landmarks:
         # Heuristic failure classification
-        if diag["reason"] in (CODE_HAND_TOO_CLOSE, CODE_HAND_TOO_FAR, CODE_HAND_OUTSIDE_FRAME):
+        if diag["reason"] == CODE_HAND_TOO_CLOSE and not diag.get("has_hand_shape", True):
+            fail_reason = CODE_HAND_OUTSIDE_FRAME
+            fail_instruction = "No hand detected — please place palm in the guide box."
+        elif diag["reason"] in (CODE_HAND_TOO_CLOSE, CODE_HAND_TOO_FAR, CODE_HAND_OUTSIDE_FRAME):
             fail_reason = diag["reason"]
             fail_instruction = diag["instruction"]
         elif diag["reason"] == "INSUFFICIENT_VISIBILITY":
@@ -210,10 +250,10 @@ def detect_hand_landmarks_with_diagnostics(gray_img: np.ndarray, landmarker) -> 
             fail_instruction = "Lighting or contrast too low. Ensure proper illumination and hold hand steady."
         else:
             # MediaPipe failed despite normal heuristic result (e.g. severe blur, orientation)
-            # Only classify as HAND_TOO_CLOSE if occupancy is extremely high (≥63%)
-            # OR top/bottom clipping (finger-tips cut off by frame edge).
+            # Only classify as HAND_TOO_CLOSE if occupancy is extremely high (≥63%) AND confirmed hand shape
+            # OR top/bottom clipping with confirmed hand shape.
             # Spread fingers can legitimately push occupancy to 45–58%; do NOT misclassify them.
-            if diag["occupancy_pct"] > 63.0 or (diag["borders"]["top"] and diag["borders"]["bottom"]):
+            if diag.get("has_hand_shape", True) and (diag["occupancy_pct"] > 63.0 or (diag["borders"]["top"] and diag["borders"]["bottom"])):
                 fail_reason = CODE_HAND_TOO_CLOSE
                 fail_instruction = "Hand is too close or fingers cropped — move hand slightly farther (~10-15cm)."
             elif diag["borders"]["left"] or diag["borders"]["right"] or diag["borders"]["top"] or diag["borders"]["bottom"]:
@@ -302,8 +342,8 @@ def compute_roi_quality(roi_224: np.ndarray, bbox: tuple, frame_shape: tuple) ->
     if pad_pct > 0.25:
         reasons.append(f"Excessive boundary padding ({pad_pct*100:.1f}% > 25.0% max)")
         error_code = CODE_QUALITY_EXCESSIVE_PADDING
-    elif contrast_std < 10.0:
-        reasons.append(f"Low vessel contrast (std={contrast_std:.1f} < 10.0 min)")
+    elif contrast_std < MIN_CONTRAST_STD:
+        reasons.append(f"Low vessel contrast (std={contrast_std:.1f} < {MIN_CONTRAST_STD:.1f} min)")
         error_code = CODE_QUALITY_LOW_CONTRAST
     elif roi_224.shape != (224, 224):
         reasons.append(f"Invalid ROI dimensions ({roi_224.shape} != 224x224)")

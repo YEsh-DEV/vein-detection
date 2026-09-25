@@ -6,7 +6,7 @@ Regression tests for Phase 13 biometric hardening:
 
   THRESHOLD TESTS (Task 1 / Task 10):
     T1. MATCH_THRESHOLD default is > 0.2226
-    T2. MATCH_THRESHOLD default is exactly 0.75 (selected calibrated value)
+    T2. MATCH_THRESHOLD default is exactly 0.55 (selected calibrated value)
     T3. MATCH_THRESHOLD is overridable via MATCH_THRESHOLD env variable
     T4. SearchEngine accepts score >= threshold (genuine accepted)
     T5. SearchEngine rejects score < threshold (unknown rejected)
@@ -38,6 +38,7 @@ from unittest.mock import patch
 from pathlib import Path
 
 import numpy as np
+import cv2
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
@@ -67,14 +68,14 @@ class TestThresholdConfiguration(unittest.TestCase):
         )
 
     def test_t2_threshold_default_is_calibrated_value(self):
-        """T2: Default MATCH_THRESHOLD without env override must be 0.75 (calibrated zero-false-accept value)."""
+        """T2: Default MATCH_THRESHOLD without env override must be 0.55 (calibrated field demo value)."""
         # Re-evaluate what the default would be without env override
         saved = os.environ.pop("MATCH_THRESHOLD", None)
         try:
-            default_val = float(os.environ.get("MATCH_THRESHOLD", "0.75"))
+            default_val = float(os.environ.get("MATCH_THRESHOLD", "0.55"))
             self.assertAlmostEqual(
-                default_val, 0.75, places=4,
-                msg="Default threshold must be calibrated value 0.75"
+                default_val, 0.55, places=4,
+                msg="Default threshold must be calibrated value 0.55"
             )
         finally:
             if saved is not None:
@@ -85,7 +86,7 @@ class TestThresholdConfiguration(unittest.TestCase):
         os.environ["MATCH_THRESHOLD"] = "0.60"
         try:
             # Re-read as constants module would
-            overridden = float(os.environ.get("MATCH_THRESHOLD", "0.75"))
+            overridden = float(os.environ.get("MATCH_THRESHOLD", "0.55"))
             self.assertAlmostEqual(overridden, 0.60, places=4)
         finally:
             del os.environ["MATCH_THRESHOLD"]
@@ -429,6 +430,49 @@ class TestPositioningHeuristic(unittest.TestCase):
                 diag["reason"], CODE_HAND_TOO_CLOSE,
                 f"Occupancy {occupancy_pct}% with no border touches should NOT be HAND_TOO_CLOSE"
             )
+
+    def test_p7_glare_or_empty_booth_triggers_outside_frame(self):
+        """
+        P7 (Issue 1): A uniformly bright/glare frame or empty cardboard booth walls with no hand shape
+        must trigger HAND_OUTSIDE_FRAME (no hand), NOT HAND_TOO_CLOSE.
+        """
+        # Case 1: Full-frame bright glare wash
+        glare_wash = np.full((480, 640), 220, dtype=np.uint8)
+        glare_wash[::2, :] = 255  # slight texture so std >= 14
+        diag_glare = diagnose_hand_positioning(glare_wash)
+        self.assertEqual(
+            diag_glare["reason"], CODE_HAND_OUTSIDE_FRAME,
+            f"Full frame glare must NOT trigger HAND_TOO_CLOSE. Got {diag_glare['reason']}"
+        )
+        self.assertIn("no hand", diag_glare["instruction"].lower())
+
+        # Case 2: Empty booth walls (bright illuminated perimeter with empty/dark center)
+        booth = np.full((480, 640), 40, dtype=np.uint8)
+        booth[0:120, :] = 160   # top wall
+        booth[-120:, :] = 160  # bottom wall
+        booth[:, 0:120] = 160  # left wall
+        booth[:, -120:] = 160  # right wall
+        diag_booth = diagnose_hand_positioning(booth)
+        self.assertEqual(
+            diag_booth["reason"], CODE_HAND_OUTSIDE_FRAME,
+            f"Empty booth walls with no hand must trigger HAND_OUTSIDE_FRAME. Got {diag_booth['reason']}"
+        )
+        self.assertIn("no hand", diag_booth["instruction"].lower())
+
+    def test_p8_hand_shaped_blob_triggers_too_close(self):
+        """
+        P8 (Issue 1): A real hand-shaped high occupancy pattern (occupying >62% or clipping borders)
+        must still correctly trigger HAND_TOO_CLOSE.
+        """
+        # Create a central hand/palm ellipse occupying ~65% with border contact
+        img = np.zeros((480, 640), dtype=np.uint8)
+        cv2.ellipse(img, (320, 240), (280, 230), 0, 0, 360, 180, -1)
+        diag = diagnose_hand_positioning(img)
+        self.assertEqual(
+            diag["reason"], CODE_HAND_TOO_CLOSE,
+            f"Hand-shaped high occupancy pattern must trigger HAND_TOO_CLOSE. Got {diag['reason']}"
+        )
+        self.assertIn("farther", diag["instruction"].lower())
 
 
 if __name__ == "__main__":

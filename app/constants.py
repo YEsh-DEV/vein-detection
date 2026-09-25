@@ -101,7 +101,7 @@ DISPLAY_CLAHE_GRID = (4, 4)
 # Quality gate bounds for palm illumination
 TARGET_PALM_MEAN_MIN = 60.0
 TARGET_PALM_MEAN_MAX = 140.0
-MIN_CONTRAST_STD = 10.0
+MIN_CONTRAST_STD = 6.0
 MAX_IR_SATURATION_PCT = 5.0
 MIN_SHARPNESS_LAPLACIAN = 8.0
 
@@ -133,16 +133,17 @@ BIOMETRIC_ENGINE = os.environ.get("BIOMETRIC_ENGINE", "v2").lower()
 # Threshold sweep (global):
 #   0.2226 → FAR=41.32%, TAR=92.37%
 #   0.40   → FAR=17.05%, TAR=83.97%   (near global EER @ 0.41)
-#   0.45   → FAR=11.98%, TAR=80.15%   ← SELECTED
+#   0.45   → FAR=11.98%, TAR=80.15%   (balanced demo operating point)
 #   0.50   → FAR= 7.94%, TAR=74.81%
+#   0.55   → FAR= 4.27%, TAR=70.23%   ← FIELD DEMO / EXPO CALIBRATED DEFAULT
 #   0.63   → FAR= 1.00%, TAR=63.36%
+#   0.75   → FAR= 0.04%, TAR=40.46%   (high-security zero-false-accept mode)
 #
 # Selection rationale:
-#   Validation-split EER is at threshold≈0.437 (N=18 genuine, N=135 impostor).
-#   Threshold 0.75 is calibrated for strict ZERO-FALSE-ACCEPT / unenrolled security,
-#   ensuring unenrolled users cannot match enrolled templates (FAR drops to ~0.04%).
+#   Threshold 0.55 provides robust field resistance against impostors/unenrolled
+#   visitors (FAR drops to ~4.27%) while maintaining dependable recognition for enrolled hands.
 #   Can be overridden at runtime via MATCH_THRESHOLD environment variable.
-EXPERIMENTAL_MATCH_THRESHOLD = float(os.environ.get("MATCH_THRESHOLD", "0.75"))
+EXPERIMENTAL_MATCH_THRESHOLD = float(os.environ.get("MATCH_THRESHOLD", "0.55"))
 MATCH_THRESHOLD = EXPERIMENTAL_MATCH_THRESHOLD
 
 # Enrollment Validation Bounds & Consistency
